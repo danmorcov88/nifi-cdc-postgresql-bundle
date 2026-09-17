@@ -103,7 +103,7 @@ abstract class AbstractCaptureChangePostgreSQLIT {
                 .withCopyFileToContainer(MountableFile.forHostPath(labFile("init/01-init.sql")), "/docker-entrypoint-initdb.d/01-init.sql")
                 .withCopyFileToContainer(MountableFile.forHostPath(labFile("fixtures/setup.sql")), "/docker-entrypoint-initdb.d/02-setup.sql")
                 .withCommand("postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=8", "-c", "max_wal_senders=8",
-                        "-c", "wal_sender_timeout=5s", "-c", "fsync=off");
+                        "-c", "wal_sender_timeout=5s", "-c", "fsync=off", "-c", "logical_decoding_work_mem=64kB");
         container.start();
     }
 
@@ -517,6 +517,149 @@ abstract class AbstractCaptureChangePostgreSQLIT {
             runner.stop();
             execute("DROP PUBLICATION IF EXISTS it_filtered_pub");
         }
+    }
+
+    @Test
+    void testStreamedLargeTransactionIsOneFlowFile() throws Exception {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        start(runner);
+        final int rows = 200_000;
+        execute("INSERT INTO lab.customers (id, name, balance) SELECT g, 'streamed ' || g, g FROM generate_series(1000, " + (1000 + rows - 1) + ") AS g");
+
+        final List<MockFlowFile> flowFiles = collectFlowFiles(runner, rows);
+
+        assertEquals(1, flowFiles.size(), "a streamed transaction is written whole");
+        flowFiles.get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, Integer.toString(rows));
+        final Set<Integer> ids = new TreeSet<>();
+        for (final JsonNode event : parse(flowFiles.get(0))) {
+            ids.add(event.get("after").get("id").asInt());
+        }
+        assertEquals(rows, ids.size());
+        assertTrue(runner.getLogger().getDebugMessages().stream().anyMatch(message -> message.getMsg().contains("Replayed streamed transaction")),
+                "the transaction was streamed and replayed from its spool");
+        assertTrue(runner.getLogger().getErrorMessages().isEmpty());
+    }
+
+    @Test
+    void testStreamedTransactionRollbackWritesNothing() throws Exception {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        start(runner);
+        try (Connection connection = openTransaction()) {
+            insertRows(connection, 1000, 20_000, "rolled back");
+            pollUntilStreamed(runner);
+            connection.rollback();
+        }
+        execute("INSERT INTO lab.customers (id, name) VALUES (900, 'after rollback')");
+
+        final List<JsonNode> events = collect(runner, 1);
+
+        assertEquals(900, events.get(0).get("after").get("id").asInt());
+        assertTrue(runner.getLogger().getDebugMessages().stream().anyMatch(message -> message.getMsg().contains("Discarded streamed transaction")));
+        assertFalse(runner.getLogger().getDebugMessages().stream().anyMatch(message -> message.getMsg().contains("Replayed streamed transaction")));
+        runner.run(1, false, false);
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+    }
+
+    @Test
+    void testStreamedSubTransactionRollback() throws Exception {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        start(runner);
+        final int rows = 30_000;
+        try (Connection connection = openTransaction(); Statement statement = connection.createStatement()) {
+            insertRows(connection, 1000, rows, "kept");
+            statement.execute("SAVEPOINT s");
+            insertRows(connection, 100_000, rows, "rolled back");
+            pollUntilStreamed(runner);
+            statement.execute("ROLLBACK TO SAVEPOINT s");
+            statement.execute("INSERT INTO lab.customers (id, name) VALUES (900, 'after rollback')");
+            connection.commit();
+        }
+
+        final List<MockFlowFile> flowFiles = collectFlowFiles(runner, rows + 1);
+
+        assertEquals(1, flowFiles.size());
+        final Set<Integer> ids = new TreeSet<>();
+        for (final JsonNode event : parse(flowFiles.get(0))) {
+            ids.add(event.get("after").get("id").asInt());
+        }
+        assertEquals(rows + 1, ids.size());
+        assertTrue(ids.contains(900));
+        assertFalse(ids.contains(100_000), "rows of the rolled back subtransaction are discarded");
+    }
+
+    @Test
+    void testTransactionCommittedWhileAnotherIsStreamed() throws Exception {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        start(runner);
+        final int rows = 50_000;
+        try (Connection connection = openTransaction()) {
+            insertRows(connection, 1000, rows, "streamed");
+            pollUntilStreamed(runner);
+            execute("INSERT INTO lab.customers (id, name) VALUES (900, 'small')");
+
+            final List<JsonNode> small = collect(runner, 1);
+            assertEquals(900, small.get(0).get("after").get("id").asInt(), "the small transaction is delivered before the streamed one commits");
+
+            connection.commit();
+        }
+
+        final List<MockFlowFile> flowFiles = collectFlowFiles(runner, rows);
+        assertEquals(1, flowFiles.size());
+        assertEquals(1000, parse(flowFiles.get(0)).get(0).get("after").get("id").asInt());
+    }
+
+    @Test
+    void testRestartDuringStreamedTransactionDeliversItOnce() throws Exception {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        start(runner);
+        final int rows = 50_000;
+        try (Connection connection = openTransaction()) {
+            insertRows(connection, 1000, rows, "streamed");
+            pollUntilStreamed(runner);
+            runner.stop();
+            final Map<String, String> state = runner.getStateManager().getState(Scope.CLUSTER).toMap();
+
+            final TestRunner secondRunner = createRunner(slotName, UnchangedToastStrategy.NULL);
+            secondRunner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+            secondRunner.getStateManager().setState(state, Scope.CLUSTER);
+            start(secondRunner);
+            runner = secondRunner;
+            connection.commit();
+        }
+
+        final List<MockFlowFile> flowFiles = collectFlowFiles(runner, rows);
+        assertEquals(1, flowFiles.size());
+        flowFiles.get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, Integer.toString(rows));
+        runner.run(1, false, false);
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+    }
+
+    private static Connection openTransaction() throws SQLException {
+        final Connection connection = DriverManager.getConnection(container.getJdbcUrl(), "postgres", "postgres");
+        connection.setAutoCommit(false);
+        return connection;
+    }
+
+    private static void insertRows(final Connection connection, final int firstId, final int count, final String name) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO lab.customers (id, name, balance) SELECT g, '" + name + " ' || g, g FROM generate_series("
+                    + firstId + ", " + (firstId + count - 1) + ") AS g");
+        }
+    }
+
+    /**
+     * Trigger the processor until the server has streamed at least one segment of the transaction in progress.
+     */
+    private static void pollUntilStreamed(final TestRunner testRunner) throws InterruptedException {
+        final long deadline = System.currentTimeMillis() + COLLECT_TIMEOUT.toMillis();
+        while (System.currentTimeMillis() < deadline) {
+            testRunner.run(1, false, false);
+            if (testRunner.getLogger().getDebugMessages().stream().anyMatch(message -> message.getMsg().contains("Spooled segment"))) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+        fail("No streamed segment received within " + COLLECT_TIMEOUT);
     }
 
     private String querySlotRestartLsn() throws SQLException {

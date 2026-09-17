@@ -47,6 +47,10 @@ import org.apache.nifi.cdc.postgresql.pgoutput.PgOutputDecoder;
 import org.apache.nifi.cdc.postgresql.pgoutput.PgOutputMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.RelationCache;
 import org.apache.nifi.cdc.postgresql.pgoutput.RelationMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.StreamAbortMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.StreamCommitMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.StreamStartMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.StreamStopMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.TruncateMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
 import org.apache.nifi.cdc.postgresql.pgoutput.UpdateMessage;
@@ -250,6 +254,28 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             .defaultValue(TransferFormat.TEXT)
             .build();
 
+    public static final PropertyDescriptor LARGE_TRANSACTION_STREAMING = new PropertyDescriptor.Builder()
+            .name("Large Transaction Streaming")
+            .description("Whether the server streams transactions that exceed its logical_decoding_work_mem while they are still in "
+                    + "progress (pgoutput protocol version 2), instead of spilling them to disk on the server and sending them at commit. "
+                    + "The processor keeps the streamed changes in temporary files and writes them when the transaction commits, so "
+                    + "FlowFiles still contain whole transactions.")
+            .required(true)
+            .allowableValues("true", "false")
+            .defaultValue("false")
+            .build();
+
+    public static final PropertyDescriptor MAX_STREAMED_TRANSACTION_SIZE = new PropertyDescriptor.Builder()
+            .name("Max Streamed Transaction Size")
+            .description("Maximum amount of streamed changes of one transaction kept in temporary files. A transaction beyond this size "
+                    + "cannot be processed until the limit is raised.")
+            .required(true)
+            .defaultValue("1 GB")
+            .addValidator(StandardValidators.DATA_SIZE_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .dependsOn(LARGE_TRANSACTION_STREAMING, "true")
+            .build();
+
     public static final PropertyDescriptor SCHEMA_NAME_PATTERN = new PropertyDescriptor.Builder()
             .name("Schema Name Pattern")
             .description("Regular expression that the schema of a table must match for its changes to be written. When not set, changes of all "
@@ -356,6 +382,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             INITIAL_SNAPSHOT,
             SNAPSHOT_FETCH_SIZE,
             TRANSFER_FORMAT,
+            LARGE_TRANSACTION_STREAMING,
+            MAX_STREAMED_TRANSACTION_SIZE,
             SCHEMA_NAME_PATTERN,
             TABLE_NAME_PATTERN,
             RECORD_WRITER,
@@ -400,6 +428,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     private volatile boolean snapshotPending;
     private InitialSnapshotMode initialSnapshotMode;
     private StreamOptions streamOptions;
+    /** Streamed transactions in progress; only used when large transaction streaming is enabled. */
+    private StreamedTransactions streamedTransactions;
     private int snapshotFetchSize;
     private int snapshotRowsPerBatch;
     private ConnectionSettings connectionSettings;
@@ -459,7 +489,11 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         maxBatchWaitMillis = batchStrategy == BatchStrategy.MAX_EVENTS
                 ? context.getProperty(MAX_BATCH_WAIT_TIME).evaluateAttributeExpressions().asTimePeriod(TimeUnit.MILLISECONDS) : 0;
         initialSnapshotMode = context.getProperty(INITIAL_SNAPSHOT).asAllowableValue(InitialSnapshotMode.class);
-        streamOptions = new StreamOptions(context.getProperty(TRANSFER_FORMAT).asAllowableValue(TransferFormat.class) == TransferFormat.BINARY);
+        final boolean streaming = context.getProperty(LARGE_TRANSACTION_STREAMING).asBoolean();
+        streamOptions = new StreamOptions(context.getProperty(TRANSFER_FORMAT).asAllowableValue(TransferFormat.class) == TransferFormat.BINARY, streaming);
+        final long maxStreamedTransactionBytes = streaming
+                ? context.getProperty(MAX_STREAMED_TRANSACTION_SIZE).evaluateAttributeExpressions().asDataSize(DataUnit.B).longValue() : 0;
+        streamedTransactions = new StreamedTransactions(maxStreamedTransactionBytes, getLogger(), null);
         snapshotFetchSize = initialSnapshotMode == InitialSnapshotMode.ON_SLOT_CREATION
                 ? context.getProperty(SNAPSHOT_FETCH_SIZE).evaluateAttributeExpressions().asInteger() : 0;
         // with one transaction per FlowFile, a table of the snapshot is one FlowFile
@@ -503,6 +537,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         closeSnapshot();
         closeStream();
         closeClient();
+        closeStreamedTransactions();
         unregisterSslContext();
     }
 
@@ -533,7 +568,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         try {
             reader.read();
             if (reader.isTransactionInProgress()) {
-                // stopped in the middle of a transaction: the transaction is sent again after the restart
+                // stopped in the middle of a transaction or of a streamed segment: the server sends them again after the restart
                 return;
             }
 
@@ -895,6 +930,10 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         final PGReplicationStream currentStream = stream;
         stream = null;
         relationCache.clear();
+        if (streamedTransactions != null) {
+            // the server sends the transactions in progress again from their first segment
+            streamedTransactions.clear();
+        }
         if (currentStream == null) {
             return;
         }
@@ -914,6 +953,18 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     private void closeClient() {
         closeQuietly(client);
         client = null;
+    }
+
+    private void closeStreamedTransactions() {
+        if (streamedTransactions == null) {
+            return;
+        }
+        try {
+            streamedTransactions.close();
+        } catch (final Exception e) {
+            getLogger().debug("Removing the temporary directory of streamed transactions failed", e);
+        }
+        streamedTransactions = null;
     }
 
     private void closeQuietly(final ReplicationClient replicationClient) {
@@ -945,7 +996,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
 
     /**
      * Reads messages from the stream into a batch until the batch is complete, no more messages are pending between
-     * transactions or the processor is stopped.
+     * transactions or the processor is stopped. Segments of streamed transactions are spooled as they arrive and
+     * replayed into the batch, like a regular transaction, when the Stream Commit message arrives.
      */
     private class BatchReader {
 
@@ -961,7 +1013,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         }
 
         boolean isTransactionInProgress() {
-            return transaction != null;
+            return transaction != null || streamedTransactions.isSegmentOpen();
         }
 
         long getLastCommitEndLsn() {
@@ -972,7 +1024,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             while (isScheduled()) {
                 final ByteBuffer buffer = currentStream.readPending();
                 if (buffer == null) {
-                    if (transaction == null) {
+                    if (!isTransactionInProgress()) {
                         // nothing pending between transactions: complete what has been read instead of waiting for more
                         return;
                     }
@@ -981,7 +1033,9 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
                 }
 
                 final LogSequenceNumber messageLsn = currentStream.getLastReceiveLSN();
-                if (handle(decoder.decode(buffer), messageLsn)) {
+                if (streamedTransactions.isSegmentOpen()) {
+                    spool(buffer, messageLsn);
+                } else if (handle(decoder.decode(buffer), messageLsn)) {
                     return;
                 }
             }
@@ -1014,10 +1068,30 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
                     if (transaction == null) {
                         throw new IllegalStateException("Commit message received outside of a transaction");
                     }
-                    transaction = null;
-                    lastCommitEndLsn = commit.endLsn();
-                    return !batch.isEmpty()
-                            && (batch.getEventCount() >= eventsPerFlowFile || System.currentTimeMillis() >= batchDeadlineMillis);
+                    return commitTransaction(commit.endLsn());
+                }
+                case StreamStartMessage start -> {
+                    if (!streamOptions.streaming()) {
+                        throw new IllegalStateException("Stream Start message received although large transaction streaming is disabled");
+                    }
+                    if (transaction != null) {
+                        throw new IllegalStateException("Stream Start message received while a transaction is in progress");
+                    }
+                    streamedTransactions.beginSegment(start.xid(), start.firstSegment());
+                }
+                case StreamStopMessage stop -> throw new IllegalStateException(String.format("%s received outside of a streamed segment", stop));
+                case StreamAbortMessage abort -> {
+                    streamedTransactions.abort(abort.xid(), abort.subTransactionXid());
+                    if (abort.isWholeTransaction()) {
+                        getLogger().debug("Discarded streamed transaction {} after its abort", Integer.toUnsignedLong(abort.xid()));
+                    }
+                }
+                case StreamCommitMessage commit -> {
+                    if (transaction != null) {
+                        throw new IllegalStateException("Stream Commit message received while a transaction is in progress");
+                    }
+                    replay(commit);
+                    return commitTransaction(commit.endLsn());
                 }
                 default -> {
                     // Type messages: the type mapper works with OIDs of built-in types, user-defined types are written as strings.
@@ -1025,6 +1099,46 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
                 }
             }
             return false;
+        }
+
+        /**
+         * @return whether the batch is complete
+         */
+        private boolean commitTransaction(final long endLsn) {
+            transaction = null;
+            lastCommitEndLsn = endLsn;
+            return !batch.isEmpty()
+                    && (batch.getEventCount() >= eventsPerFlowFile || System.currentTimeMillis() >= batchDeadlineMillis);
+        }
+
+        /**
+         * Keep a message of the open streamed segment; only the Stream Stop message is handled right away.
+         */
+        private void spool(final ByteBuffer buffer, final LogSequenceNumber lsn) throws IOException {
+            final byte type = PgOutputDecoder.messageType(buffer);
+            if (PgOutputDecoder.isTransactionMessage(type)) {
+                streamedTransactions.append(lsn.asLong(), buffer);
+                return;
+            }
+            if (decoder.decode(buffer, true) instanceof StreamStopMessage) {
+                streamedTransactions.endSegment();
+                getLogger().debug("Spooled segment of a streamed transaction; {} transactions in progress", streamedTransactions.getTransactionCount());
+            } else {
+                throw new IllegalStateException(String.format("Message of type [%c] received inside a streamed segment", (char) type));
+            }
+        }
+
+        /**
+         * Write the spooled changes of a committed streamed transaction to the batch, as if they had arrived in a
+         * regular transaction.
+         */
+        private void replay(final StreamCommitMessage commit) throws IOException {
+            try (StreamedTransactionSpool spool = streamedTransactions.remove(commit.xid())) {
+                transaction = new TransactionInfo(Integer.toUnsignedLong(commit.xid()), commit.commitTime());
+                spool.replay((lsn, message) -> handle(decoder.decode(message, true), LogSequenceNumber.valueOf(lsn)));
+                getLogger().debug("Replayed streamed transaction {} with {} messages ({} bytes) from its spool", transaction.xid(),
+                        spool.getMessageCount(), spool.getSize());
+            }
         }
 
         private void change(final ChangeOperation operation, final int relationId, final LogSequenceNumber lsn, final TupleData before,

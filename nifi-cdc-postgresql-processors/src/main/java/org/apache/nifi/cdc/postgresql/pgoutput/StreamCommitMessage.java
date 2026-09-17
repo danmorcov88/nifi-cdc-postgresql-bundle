@@ -14,23 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.cdc.postgresql.client;
+package org.apache.nifi.cdc.postgresql.pgoutput;
+
+import java.time.Instant;
 
 /**
- * Options of the pgoutput plugin passed to START_REPLICATION.
+ * Commit of a streamed transaction, protocol version 2; sent after the last segment of the transaction.
  *
- * @param binary whether column values are sent in the binary send format of their type instead of text
- * @param streaming whether transactions larger than logical_decoding_work_mem are streamed while in progress,
- *                  which requires protocol version 2
+ * @param xid id of the top-level transaction
+ * @param commitLsn position of the commit record
+ * @param endLsn position right after the commit record
+ * @param commitTime commit timestamp
  */
-public record StreamOptions(boolean binary, boolean streaming) {
-
-    public static final StreamOptions DEFAULT = new StreamOptions(false, false);
-
-    /**
-     * @return the pgoutput protocol version the options require
-     */
-    public int protocolVersion() {
-        return streaming ? 2 : 1;
-    }
+public record StreamCommitMessage(int xid, long commitLsn, long endLsn, Instant commitTime) implements PgOutputMessage {
 }

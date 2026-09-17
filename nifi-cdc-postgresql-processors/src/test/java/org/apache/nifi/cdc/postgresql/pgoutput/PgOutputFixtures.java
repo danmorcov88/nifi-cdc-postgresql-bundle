@@ -21,6 +21,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 
@@ -58,5 +59,24 @@ public final class PgOutputFixtures {
     public static List<PgOutputMessage> decode(final String server, final String scenario) {
         final PgOutputDecoder decoder = new PgOutputDecoder();
         return load(server, scenario).stream().map(decoder::decode).toList();
+    }
+
+    /**
+     * Decode a recording made with protocol version 2 and streaming, tracking the segments of streamed transactions.
+     */
+    public static List<PgOutputMessage> decodeStream(final String server, final String scenario) {
+        final PgOutputDecoder decoder = new PgOutputDecoder();
+        final List<PgOutputMessage> messages = new ArrayList<>();
+        boolean inStream = false;
+        for (final ByteBuffer buffer : load(server, scenario)) {
+            final PgOutputMessage message = decoder.decode(buffer, inStream);
+            if (message instanceof StreamStartMessage) {
+                inStream = true;
+            } else if (message instanceof StreamStopMessage) {
+                inStream = false;
+            }
+            messages.add(message);
+        }
+        return messages;
     }
 }

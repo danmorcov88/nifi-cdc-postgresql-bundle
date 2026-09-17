@@ -17,8 +17,9 @@
 package org.apache.nifi.cdc.postgresql.pgoutput;
 
 /**
- * A logical replication message produced by the pgoutput plugin (protocol version 1).
+ * A logical replication message produced by the pgoutput plugin (protocol versions 1 and 2).
  */
 public sealed interface PgOutputMessage permits BeginMessage, CommitMessage, OriginMessage, RelationMessage, TypeMessage,
-        InsertMessage, UpdateMessage, DeleteMessage, TruncateMessage {
+        InsertMessage, UpdateMessage, DeleteMessage, TruncateMessage, StreamStartMessage, StreamStopMessage, StreamCommitMessage,
+        StreamAbortMessage {
 }

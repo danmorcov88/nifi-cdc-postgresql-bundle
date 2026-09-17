@@ -14,23 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.cdc.postgresql.client;
+package org.apache.nifi.cdc.postgresql.pgoutput;
 
 /**
- * Options of the pgoutput plugin passed to START_REPLICATION.
+ * Abort of a streamed transaction or of one of its subtransactions, protocol version 2.
  *
- * @param binary whether column values are sent in the binary send format of their type instead of text
- * @param streaming whether transactions larger than logical_decoding_work_mem are streamed while in progress,
- *                  which requires protocol version 2
+ * @param xid id of the top-level transaction
+ * @param subTransactionXid id of the aborted subtransaction, equal to {@code xid} when the whole transaction was aborted
  */
-public record StreamOptions(boolean binary, boolean streaming) {
+public record StreamAbortMessage(int xid, int subTransactionXid) implements PgOutputMessage {
 
-    public static final StreamOptions DEFAULT = new StreamOptions(false, false);
-
-    /**
-     * @return the pgoutput protocol version the options require
-     */
-    public int protocolVersion() {
-        return streaming ? 2 : 1;
+    public boolean isWholeTransaction() {
+        return xid == subTransactionXid;
     }
 }

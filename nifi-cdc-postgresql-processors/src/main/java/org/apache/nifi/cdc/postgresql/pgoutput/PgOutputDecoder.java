@@ -24,9 +24,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Decoder for the binary messages of the pgoutput logical decoding plugin, protocol version 1 with tuples in text
- * or binary format, as documented in the "Logical Replication Message Formats" chapter of the PostgreSQL manual.
- * The decoder is stateless: one call decodes exactly one message and fails when bytes remain after it.
+ * Decoder for the binary messages of the pgoutput logical decoding plugin, protocol versions 1 and 2 with tuples in
+ * text or binary format, as documented in the "Logical Replication Message Formats" chapter of the PostgreSQL manual.
+ * The decoder is stateless: one call decodes exactly one message and fails when bytes remain after it. Whether a
+ * message belongs to a segment of a streamed transaction, in which case it carries a transaction id after the type
+ * byte, is tracked by the caller from the Stream Start and Stream Stop messages.
  */
 public class PgOutputDecoder {
 
@@ -39,6 +41,10 @@ public class PgOutputDecoder {
     private static final byte MESSAGE_UPDATE = 'U';
     private static final byte MESSAGE_DELETE = 'D';
     private static final byte MESSAGE_TRUNCATE = 'T';
+    private static final byte MESSAGE_STREAM_START = 'S';
+    private static final byte MESSAGE_STREAM_STOP = 'E';
+    private static final byte MESSAGE_STREAM_COMMIT = 'c';
+    private static final byte MESSAGE_STREAM_ABORT = 'A';
 
     private static final byte TUPLE_NEW = 'N';
     private static final byte TUPLE_KEY = 'K';
@@ -59,13 +65,26 @@ public class PgOutputDecoder {
     private static final long NANOS_PER_MICRO = 1_000L;
 
     /**
-     * Decode one message.
+     * Decode one message that is not part of a streamed transaction segment.
      *
      * @param buffer buffer positioned at the message type byte; the whole remaining content must belong to the message
      * @return the decoded message
      * @throws PgOutputException when the message type is not supported or the content is malformed
      */
     public PgOutputMessage decode(final ByteBuffer buffer) {
+        return decode(buffer, false);
+    }
+
+    /**
+     * Decode one message.
+     *
+     * @param buffer buffer positioned at the message type byte; the whole remaining content must belong to the message
+     * @param inStream whether the message was received inside a streamed transaction segment, in which case Relation,
+     *                 Type, Insert, Update, Delete and Truncate messages carry a transaction id after the type byte
+     * @return the decoded message
+     * @throws PgOutputException when the message type is not supported or the content is malformed
+     */
+    public PgOutputMessage decode(final ByteBuffer buffer, final boolean inStream) {
         final byte type;
         try {
             type = buffer.get();
@@ -75,6 +94,9 @@ public class PgOutputDecoder {
 
         final PgOutputMessage message;
         try {
+            if (inStream && isTransactionMessage(type)) {
+                buffer.getInt(); // id of the (sub)transaction that made the change, see streamedTransactionId()
+            }
             message = switch (type) {
                 case MESSAGE_BEGIN -> decodeBegin(buffer);
                 case MESSAGE_COMMIT -> decodeCommit(buffer);
@@ -85,6 +107,10 @@ public class PgOutputDecoder {
                 case MESSAGE_UPDATE -> decodeUpdate(buffer);
                 case MESSAGE_DELETE -> decodeDelete(buffer);
                 case MESSAGE_TRUNCATE -> decodeTruncate(buffer);
+                case MESSAGE_STREAM_START -> new StreamStartMessage(buffer.getInt(), buffer.get() != 0);
+                case MESSAGE_STREAM_STOP -> StreamStopMessage.INSTANCE;
+                case MESSAGE_STREAM_COMMIT -> decodeStreamCommit(buffer);
+                case MESSAGE_STREAM_ABORT -> new StreamAbortMessage(buffer.getInt(), buffer.getInt());
                 default -> throw new PgOutputException(String.format("Unsupported pgoutput message type [%c]", (char) type));
             };
         } catch (final BufferUnderflowException e) {
@@ -95,6 +121,50 @@ public class PgOutputDecoder {
             throw new PgOutputException(String.format("Unexpected %d trailing bytes after pgoutput message of type [%c]", buffer.remaining(), (char) type));
         }
         return message;
+    }
+
+    /**
+     * @return the type byte of the message, without consuming it
+     */
+    public static byte messageType(final ByteBuffer buffer) {
+        if (!buffer.hasRemaining()) {
+            throw new PgOutputException("Empty pgoutput message");
+        }
+        return buffer.get(buffer.position());
+    }
+
+    /**
+     * @return whether messages of the type carry a transaction id inside streamed transaction segments
+     */
+    public static boolean isTransactionMessage(final byte type) {
+        return switch (type) {
+            case MESSAGE_RELATION, MESSAGE_TYPE, MESSAGE_INSERT, MESSAGE_UPDATE, MESSAGE_DELETE, MESSAGE_TRUNCATE -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * @param buffer buffer positioned at the type byte of a message received inside a streamed transaction segment
+     * @return the id of the (sub)transaction that made the change, without consuming the buffer
+     */
+    public static int streamedTransactionId(final ByteBuffer buffer) {
+        final byte type = messageType(buffer);
+        if (!isTransactionMessage(type)) {
+            throw new PgOutputException(String.format("Message of type [%c] carries no transaction id", (char) type));
+        }
+        if (buffer.remaining() < 1 + Integer.BYTES) {
+            throw new PgOutputException(String.format("Truncated pgoutput message of type [%c]", (char) type));
+        }
+        return buffer.getInt(buffer.position() + 1);
+    }
+
+    private StreamCommitMessage decodeStreamCommit(final ByteBuffer buffer) {
+        final int xid = buffer.getInt();
+        buffer.get(); // flags, currently unused and always zero
+        final long commitLsn = buffer.getLong();
+        final long endLsn = buffer.getLong();
+        final Instant commitTime = readTimestamp(buffer);
+        return new StreamCommitMessage(xid, commitLsn, endLsn, commitTime);
     }
 
     private BeginMessage decodeBegin(final ByteBuffer buffer) {

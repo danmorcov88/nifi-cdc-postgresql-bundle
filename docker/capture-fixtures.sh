@@ -14,9 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Records pgoutput messages (protocol version 1) from the lab containers into
-# nifi-cdc-postgresql-processors/src/test/resources/pgoutput/<server>/<scenario>.hex (text tuples) and
-# <server>-binary/<scenario>.hex (binary tuples), one hex-encoded message per line.
+# Records pgoutput messages from the lab containers into nifi-cdc-postgresql-processors/src/test/resources/pgoutput/,
+# one hex-encoded message per line:
+#   <server>/<scenario>.hex          protocol version 1, text tuples
+#   <server>-binary/<scenario>.hex   protocol version 1, binary tuples
+#   <server>-stream/<scenario>.hex   protocol version 2 with streaming, transactions larger than logical_decoding_work_mem
 # Requires `docker compose up -d postgres14 postgres18`. Pass the target directories to record as arguments
 # to limit the run, for example `pg14-binary pg18-binary`.
 set -euo pipefail
@@ -25,7 +27,8 @@ cd "$(dirname "$0")/.."
 OUT=nifi-cdc-postgresql-processors/src/test/resources/pgoutput
 SLOT=fixture_capture
 
-for target in cdc-postgres14:pg14 cdc-postgres18:pg18 cdc-postgres14:pg14-binary cdc-postgres18:pg18-binary; do
+for target in cdc-postgres14:pg14 cdc-postgres18:pg18 cdc-postgres14:pg14-binary cdc-postgres18:pg18-binary \
+              cdc-postgres14:pg14-stream cdc-postgres18:pg18-stream; do
     container=${target%%:*}
     name=${target##*:}
     if [ $# -gt 0 ] && [[ " $* " != *" $name "* ]]; then
@@ -34,8 +37,9 @@ for target in cdc-postgres14:pg14 cdc-postgres18:pg18 cdc-postgres14:pg14-binary
     dir=$OUT/$name
     mkdir -p "$dir"
     case $name in
-        *-binary) binary=true ;;
-        *) binary=false ;;
+        *-binary) options="'proto_version', '1', 'binary', 'true'" ;;
+        *-stream) options="'proto_version', '2', 'streaming', 'on'" ;;
+        *) options="'proto_version', '1'" ;;
     esac
 
     sql() {
@@ -48,7 +52,7 @@ for target in cdc-postgres14:pg14 cdc-postgres18:pg18 cdc-postgres14:pg14-binary
         local statements=$2
         sql -c "SELECT pg_create_logical_replication_slot('$SLOT', 'pgoutput')" > /dev/null
         sql -c "$statements" > /dev/null
-        sql -c "SELECT encode(data, 'hex') FROM pg_logical_slot_get_binary_changes('$SLOT', NULL, NULL, 'proto_version', '1', 'publication_names', 'nifi_cdc_pub', 'binary', '$binary')" > "$dir/$name.hex"
+        sql -c "SELECT encode(data, 'hex') FROM pg_logical_slot_get_binary_changes('$SLOT', NULL, NULL, $options, 'publication_names', 'nifi_cdc_pub')" > "$dir/$name.hex"
         sql -c "SELECT pg_drop_replication_slot('$SLOT')" > /dev/null
         printf '%-12s %-32s %3d messages\n' "${target##*:}" "$name" "$(wc -l < "$dir/$name.hex")"
     }
@@ -56,6 +60,27 @@ for target in cdc-postgres14:pg14 cdc-postgres18:pg18 cdc-postgres14:pg14-binary
     sql -c "SELECT pg_drop_replication_slot('$SLOT') FROM pg_replication_slots WHERE slot_name = '$SLOT'" > /dev/null
     sql -f - < docker/fixtures/setup.sql
     sql -c "DELETE FROM lab.orders; DELETE FROM lab.customers WHERE id > 2" > /dev/null
+
+    if [[ $name == *-stream ]]; then
+        # transactions of a thousand rows exceed the 64kB logical_decoding_work_mem of the lab servers
+        capture stream-large-transaction \
+            "INSERT INTO lab.customers (id, name, balance) SELECT g, 'stream ' || g, g FROM generate_series(1000, 2199) AS g"
+        sql -c "DELETE FROM lab.customers WHERE id > 2" > /dev/null
+
+        capture stream-rollback "BEGIN;
+            INSERT INTO lab.customers (id, name, balance) SELECT g, 'rolled back ' || g, g FROM generate_series(1000, 2199) AS g;
+            ROLLBACK"
+
+        capture stream-subtransaction-rollback "BEGIN;
+            INSERT INTO lab.customers (id, name, balance) SELECT g, 'kept ' || g, g FROM generate_series(1000, 1599) AS g;
+            SAVEPOINT s;
+            INSERT INTO lab.customers (id, name, balance) SELECT g, 'rolled back ' || g, g FROM generate_series(1600, 2199) AS g;
+            ROLLBACK TO SAVEPOINT s;
+            INSERT INTO lab.customers (id, name) VALUES (5000, 'after rollback');
+            COMMIT"
+        sql -c "DELETE FROM lab.customers WHERE id > 2" > /dev/null
+        continue
+    fi
 
     capture insert-customers \
         "INSERT INTO lab.customers (id, name, email, balance) VALUES (100, 'Fixture One', 'one@example.com', 10.50)"

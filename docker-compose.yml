@@ -38,6 +38,9 @@ x-postgres-common: &postgres-common
     - max_wal_senders=8
     - -c
     - wal_sender_timeout=60s
+    # small limit so that moderately large transactions are streamed when the processor asks for it
+    - -c
+    - logical_decoding_work_mem=64kB
   volumes:
     - ./docker/init:/docker-entrypoint-initdb.d:ro
   healthcheck:

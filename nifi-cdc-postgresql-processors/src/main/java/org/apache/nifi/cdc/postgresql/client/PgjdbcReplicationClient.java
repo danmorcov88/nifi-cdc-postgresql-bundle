@@ -39,7 +39,6 @@ import java.util.concurrent.TimeUnit;
 public class PgjdbcReplicationClient implements ReplicationClient {
 
     public static final String OUTPUT_PLUGIN = "pgoutput";
-    private static final int PROTOCOL_VERSION = 1;
 
     private final ConnectionSettings settings;
     private Connection connection;
@@ -143,9 +142,10 @@ public class PgjdbcReplicationClient implements ReplicationClient {
                 .replicationStream()
                 .logical()
                 .withSlotName(slotName)
-                .withSlotOption("proto_version", PROTOCOL_VERSION)
+                .withSlotOption("proto_version", options.protocolVersion())
                 .withSlotOption("publication_names", publicationName)
                 .withSlotOption("binary", options.binary())
+                .withSlotOption("streaming", options.streaming())
                 .withStatusInterval((int) statusInterval.toMillis(), TimeUnit.MILLISECONDS)
                 // the processor decides which positions are confirmed; the driver must not advance them on its own
                 .withAutomaticFlush(false);

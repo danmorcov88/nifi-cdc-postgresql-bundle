@@ -104,9 +104,9 @@ The NAR is produced at `nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2
 
 ## Development lab
 
-`docker-compose.yml` starts PostgreSQL 14 and 18 configured for logical replication (ports 5414 and 5418) with a
-replication user, two tables and a publication (`docker/init/01-init.sql`), and a NiFi 2.12.0 container that loads
-the built NAR:
+`docker-compose.yml` starts PostgreSQL 14 and 18 configured for logical replication (ports 5414 and 5418, with a
+small `logical_decoding_work_mem` so that transactions of a few thousand rows are streamed) with a replication user,
+two tables and a publication (`docker/init/01-init.sql`), and a NiFi 2.12.0 container that loads the built NAR:
 
 ```
 docker compose up -d postgres14 postgres18
@@ -114,13 +114,14 @@ docker compose up -d postgres14 postgres18
 docker compose --profile nifi up -d          # https://localhost:8443/nifi  (admin / adminadminadmin)
 ```
 
-`docker/capture-fixtures.sh` records pgoutput messages from both servers, in text and in binary format, into
-`nifi-cdc-postgresql-processors/src/test/resources/pgoutput/`; the decoder tests run against these recordings.
+`docker/capture-fixtures.sh` records pgoutput messages from both servers, in text and in binary format and with
+protocol version 2 streaming, into `nifi-cdc-postgresql-processors/src/test/resources/pgoutput/`; the decoder tests
+run against these recordings.
 
 ## Status
 
-Working and covered by unit and integration tests. Not yet supported: pgoutput protocol version 2 (streaming of
-large transactions in progress).
+Working and covered by unit and integration tests: change capture, initial snapshot, binary transfer format and
+streaming of large transactions (pgoutput protocol version 2).
 
 ## License
 

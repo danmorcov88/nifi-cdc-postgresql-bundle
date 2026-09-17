@@ -234,6 +234,66 @@ class PgOutputDecoderTest {
     }
 
     @Test
+    void testDecodeStreamStart() {
+        assertEquals(new StreamStartMessage(XID, true), decoder.decode(new MessageBuilder('S').int32(XID).int8(1).build()));
+        assertEquals(new StreamStartMessage(XID, false), decoder.decode(new MessageBuilder('S').int32(XID).int8(0).build(), true));
+    }
+
+    @Test
+    void testDecodeStreamStop() {
+        assertEquals(StreamStopMessage.INSTANCE, decoder.decode(new MessageBuilder('E').build(), true));
+    }
+
+    @Test
+    void testDecodeStreamCommit() {
+        final ByteBuffer buffer = new MessageBuilder('c').int32(XID).int8(0).int64(LSN).int64(END_LSN).int64(COMMIT_MICROS).build();
+
+        assertEquals(new StreamCommitMessage(XID, LSN, END_LSN, COMMIT_TIME), decoder.decode(buffer));
+    }
+
+    @Test
+    void testDecodeStreamAbort() {
+        final StreamAbortMessage whole = (StreamAbortMessage) decoder.decode(new MessageBuilder('A').int32(XID).int32(XID).build());
+        assertTrue(whole.isWholeTransaction());
+
+        final StreamAbortMessage subTransaction = (StreamAbortMessage) decoder.decode(new MessageBuilder('A').int32(XID).int32(XID + 1).build());
+        assertEquals(XID, subTransaction.xid());
+        assertEquals(XID + 1, subTransaction.subTransactionXid());
+        assertFalse(subTransaction.isWholeTransaction());
+    }
+
+    @Test
+    void testDecodeStreamedInsertCarriesTransactionId() {
+        final ByteBuffer buffer = new MessageBuilder('I').int32(XID + 2).int32(RELATION_ID).int8('N').int16(1).int8('t').text("1").build();
+
+        assertEquals('I', PgOutputDecoder.messageType(buffer));
+        assertEquals(XID + 2, PgOutputDecoder.streamedTransactionId(buffer));
+        assertEquals(0, buffer.position(), "peeking does not consume the buffer");
+        final InsertMessage insert = (InsertMessage) decoder.decode(buffer, true);
+        assertEquals(RELATION_ID, insert.relationId());
+        assertEquals(List.of(ColumnValue.text("1")), insert.newTuple().columns());
+    }
+
+    @Test
+    void testDecodeStreamedRelationCarriesTransactionId() {
+        final ByteBuffer buffer = new MessageBuilder('R').int32(XID).int32(RELATION_ID).string("lab").string("t").int8('d').int16(0).build();
+
+        final RelationMessage relation = (RelationMessage) decoder.decode(buffer, true);
+
+        assertEquals(RELATION_ID, relation.relationId());
+        assertEquals("t", relation.name());
+    }
+
+    @Test
+    void testStreamedTransactionIdRequiresTransactionMessage() {
+        final PgOutputException exception = assertThrows(PgOutputException.class,
+                () -> PgOutputDecoder.streamedTransactionId(new MessageBuilder('E').build()));
+        assertTrue(exception.getMessage().contains("[E]"));
+        assertThrows(PgOutputException.class, () -> PgOutputDecoder.streamedTransactionId(new MessageBuilder('I').int16(1).build()));
+        assertThrows(PgOutputException.class, () -> PgOutputDecoder.messageType(ByteBuffer.allocate(0)));
+    }
+
+    @Test
     void testDecodeEmptyMessage() {
         assertThrows(PgOutputException.class, () -> decoder.decode(ByteBuffer.allocate(0)));
     }

@@ -28,6 +28,8 @@ import org.apache.nifi.cdc.postgresql.pgoutput.ColumnValue;
 import org.apache.nifi.cdc.postgresql.pgoutput.CommitMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.PgOutputFixtures;
 import org.apache.nifi.cdc.postgresql.pgoutput.RelationMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.StreamCommitMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.StreamStartMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.json.JsonRecordSetWriter;
@@ -43,6 +45,7 @@ import org.postgresql.replication.LogSequenceNumber;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -59,6 +62,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CaptureChangePostgreSQLTest {
 
     private static final String SERVER = "pg18";
+    private static final String STREAM_SERVER = "pg18-stream";
     private static final String WRITER_ID = "writer";
 
     private TestRunner runner;
@@ -488,7 +492,7 @@ class CaptureChangePostgreSQLTest {
 
         runner.run();
 
-        assertEquals(List.of(new StreamOptions(true)), client.streamOptions);
+        assertEquals(List.of(new StreamOptions(true, false)), client.streamOptions);
         runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 2);
         final List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS);
         final String customers = flowFiles.get(0).getContent();
@@ -503,6 +507,126 @@ class CaptureChangePostgreSQLTest {
         assertTrue(types.contains("c_numeric_free=null"), types);
         assertEquals(8, runner.getLogger().getWarnMessages().size(), "four columns without binary mapping, four unrepresentable values");
         assertTrue(runner.getLogger().getWarnMessages().stream().anyMatch(message -> message.getMsg().contains("lab.type_samples.c_int_array") && message.getMsg().contains("no binary mapping")));
+    }
+
+    @Test
+    void testStreamedTransactionIsWrittenAtCommit() throws IOException {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        final List<ByteBuffer> messages = PgOutputFixtures.load(STREAM_SERVER, "stream-large-transaction");
+        client.addMessages(messages);
+
+        runner.run();
+
+        assertEquals(List.of(new StreamOptions(false, true)), client.streamOptions);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile flowFile = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_TABLE, "customers");
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1200");
+        final StreamStartMessage start = (StreamStartMessage) PgOutputFixtures.decodeStream(STREAM_SERVER, "stream-large-transaction").get(0);
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_XID, Long.toString(Integer.toUnsignedLong(start.xid())));
+        // the second raw message is the Relation, the third the first Insert: its position is the third counter value of the fake stream
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_LSN, LogSequenceNumber.valueOf(16L * (messages.size() - 2)).asString());
+        final String content = flowFile.getContent();
+        assertTrue(content.contains("name=stream 1000"), content);
+        assertTrue(content.contains("name=stream 2199"), content);
+        assertEquals(lastStreamCommitEndLsn("stream-large-transaction"), runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+        assertTrue(runner.getLogger().getDebugMessages().stream().anyMatch(message -> message.getMsg().contains("Replayed streamed transaction")));
+    }
+
+    @Test
+    void testStreamedTransactionRollbackWritesNothing() throws IOException {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        client.addMessages(PgOutputFixtures.load("pg14-stream", "stream-rollback"));
+        client.addMessages(PgOutputFixtures.load(SERVER, "insert-customers"));
+
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1");
+        assertEquals(lastCommitEndLsn("insert-customers"), runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+    }
+
+    @Test
+    void testStreamedSubTransactionRollback() {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        client.addMessages(PgOutputFixtures.load(STREAM_SERVER, "stream-subtransaction-rollback"));
+
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile flowFile = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "601");
+        final String content = flowFile.getContent();
+        assertTrue(content.contains("name=kept 1599"), content);
+        assertTrue(content.contains("name=after rollback"), content);
+        assertFalse(content.contains("rolled back"), "changes of the rolled back subtransaction are discarded");
+    }
+
+    @Test
+    void testTransactionCommittedBetweenStreamedSegments() {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        runner.setProperty(CaptureChangePostgreSQL.BATCH_STRATEGY, BatchStrategy.ONE_TRANSACTION);
+        final List<ByteBuffer> streamed = PgOutputFixtures.load(STREAM_SERVER, "stream-large-transaction");
+        final int firstSegmentEnd = firstStreamStop(streamed) + 1;
+        client.addMessages(streamed.subList(0, firstSegmentEnd));
+        client.addMessages(PgOutputFixtures.load(SERVER, "insert-customers"));
+        client.addMessages(streamed.subList(firstSegmentEnd, streamed.size()));
+
+        runner.run(2);
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 2);
+        final List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS);
+        flowFiles.get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1");
+        assertTrue(flowFiles.get(0).getContent().contains("name=Fixture One"), "the small transaction commits before the streamed one");
+        flowFiles.get(1).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1200");
+    }
+
+    @Test
+    void testReconnectDuringStreamedSegmentDeliversTheTransactionOnce() throws IOException {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        final List<ByteBuffer> streamed = PgOutputFixtures.load(STREAM_SERVER, "stream-large-transaction");
+        client.addMessages(streamed.subList(0, firstStreamStop(streamed) + 1));
+        client.addMessages(streamed.subList(0, 100));
+        client.readFailure = new SQLException("connection lost");
+
+        runner.run(1, false);
+
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+        assertEquals(1, runner.getLogger().getErrorMessages().size());
+        assertTrue(client.stream.isClosed());
+
+        // the server sends the transaction again from its first segment
+        client.addMessages(streamed);
+        runner.run(1, false, false);
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1200");
+        assertEquals(2, client.streamStartPositions.size());
+    }
+
+    @Test
+    void testStreamedTransactionAboveSizeLimitFails() {
+        runner.setProperty(CaptureChangePostgreSQL.LARGE_TRANSACTION_STREAMING, "true");
+        runner.setProperty(CaptureChangePostgreSQL.MAX_STREAMED_TRANSACTION_SIZE, "10 KB");
+        client.addMessages(PgOutputFixtures.load(STREAM_SERVER, "stream-large-transaction"));
+
+        runner.run(1, false);
+
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+        assertEquals(1, runner.getLogger().getErrorMessages().size());
+        assertTrue(runner.getLogger().getErrorMessages().get(0).getThrowable().getMessage().contains("exceeds the configured maximum size"));
+        assertTrue(client.stream.isClosed());
+    }
+
+    @Test
+    void testStreamMessagesAreRejectedWithoutStreaming() {
+        client.addMessages(PgOutputFixtures.load(STREAM_SERVER, "stream-large-transaction").subList(0, 3));
+
+        runner.run(1, false);
+
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+        assertEquals(1, runner.getLogger().getErrorMessages().size());
+        assertTrue(client.stream.isClosed());
     }
 
     @Test
@@ -726,6 +850,24 @@ class CaptureChangePostgreSQLTest {
         assertInstanceOf(ProcessException.class, cause);
         assertTrue(cause.getMessage().contains(expectedMessage), cause.getMessage());
         assertTrue(client.closed);
+    }
+
+    private static int firstStreamStop(final List<ByteBuffer> messages) {
+        for (int i = 0; i < messages.size(); i++) {
+            if (messages.get(i).get(0) == 'E') {
+                return i;
+            }
+        }
+        throw new IllegalArgumentException("No Stream Stop message");
+    }
+
+    private static String lastStreamCommitEndLsn(final String scenario) {
+        return PgOutputFixtures.decodeStream(STREAM_SERVER, scenario).stream()
+                .filter(StreamCommitMessage.class::isInstance)
+                .map(StreamCommitMessage.class::cast)
+                .reduce((first, second) -> second)
+                .map(commit -> LogSequenceNumber.valueOf(commit.endLsn()).asString())
+                .orElseThrow();
     }
 
     private static String lastCommitEndLsn(final String scenario) {

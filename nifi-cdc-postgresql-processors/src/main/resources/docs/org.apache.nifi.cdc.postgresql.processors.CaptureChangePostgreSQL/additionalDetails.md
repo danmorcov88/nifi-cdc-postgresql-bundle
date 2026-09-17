@@ -87,6 +87,17 @@ SELECT pg_drop_replication_slot('nifi_cdc_slot');
 Set `WAL Retention Warning Threshold` to get a warning bulletin when the retained log grows beyond a limit, and
 consider `max_slot_wal_keep_size` on the server as a hard limit.
 
+## Large transactions
+
+By default the server decodes a transaction completely before sending it, spilling it to disk when it exceeds
+`logical_decoding_work_mem`. With `Large Transaction Streaming` enabled, the server streams such transactions
+while they are still in progress (protocol version 2). The processor keeps the streamed changes in temporary files
+under the temporary directory of the JVM and writes them when the transaction commits, so a FlowFile still holds
+whole transactions and nothing is written for a transaction that is rolled back. `Max Streamed Transaction Size`
+bounds the temporary files of one transaction; a larger transaction is reported as an error until the limit is
+raised. The files are removed when the processor stops or reconnects, as the server sends the transactions in
+progress again.
+
 ## Output
 
 Each FlowFile holds the events of one table from one batch, written with the configured Record Writer. A batch always
