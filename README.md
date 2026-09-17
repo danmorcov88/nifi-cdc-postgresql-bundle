@@ -47,6 +47,29 @@ The processor documentation (Usage in the NiFi UI) describes the server settings
 mapping and the operational notes, in particular the write-ahead log that a replication slot retains while the
 processor is stopped.
 
+## How it looks
+
+The processor connected to a `PutFile`, with the FlowFiles of one batch queued between them:
+
+![Flow](examples/screenshots/flow.png)
+
+Connection and output settings:
+
+![Connection properties](examples/screenshots/properties-connection.png)
+
+![Output properties](examples/screenshots/properties-output.png)
+
+One FlowFile per table and batch, with the `cdc.*` attributes:
+
+![Queue](examples/screenshots/queue.png)
+
+![FlowFile attributes](examples/screenshots/flowfile-attributes.png)
+
+The content of a FlowFile written by `JsonRecordSetWriter`, here an insert followed by an update of the same row in
+`lab.orders` (`REPLICA IDENTITY FULL`, so the update carries the full `before` image):
+
+![FlowFile content](examples/screenshots/flowfile-content.png)
+
 ## Example flow
 
 [examples/capture-change-postgresql.json](examples/capture-change-postgresql.json) is a flow definition with the
