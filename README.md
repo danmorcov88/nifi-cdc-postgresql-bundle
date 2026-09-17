@@ -20,7 +20,8 @@ from PostgreSQL through logical replication with the built-in `pgoutput` plugin,
 Intended for contribution to Apache NiFi under [NIFI-4239](https://issues.apache.org/jira/browse/NIFI-4239).
 The module layout, build and coding conventions follow `nifi-extension-bundles/nifi-cdc` on the NiFi `main` branch.
 
-**Status:** work in progress. The processor is not functional yet.
+**Status:** work in progress. The processor captures and delivers changes (MVP); reconnection, integration tests
+and documentation are still being worked on.
 
 ## Requirements
 

@@ -27,9 +27,9 @@ import java.util.List;
 /**
  * Loads pgoutput messages recorded by docker/capture-fixtures.sh from src/test/resources/pgoutput.
  */
-final class PgOutputFixtures {
+public final class PgOutputFixtures {
 
-    static final List<String> SERVERS = List.of("pg14", "pg18");
+    public static final List<String> SERVERS = List.of("pg14", "pg18");
 
     private PgOutputFixtures() {
     }
@@ -39,7 +39,7 @@ final class PgOutputFixtures {
      * @param scenario fixture name without extension
      * @return one buffer per recorded message, in the order the server produced them
      */
-    static List<ByteBuffer> load(final String server, final String scenario) {
+    public static List<ByteBuffer> load(final String server, final String scenario) {
         final String resource = String.format("/pgoutput/%s/%s.hex", server, scenario);
         try (InputStream stream = PgOutputFixtures.class.getResourceAsStream(resource)) {
             if (stream == null) {
@@ -55,7 +55,7 @@ final class PgOutputFixtures {
         }
     }
 
-    static List<PgOutputMessage> decode(final String server, final String scenario) {
+    public static List<PgOutputMessage> decode(final String server, final String scenario) {
         final PgOutputDecoder decoder = new PgOutputDecoder();
         return load(server, scenario).stream().map(decoder::decode).toList();
     }
