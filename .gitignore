@@ -5,3 +5,7 @@ target/
 *.log
 .DS_Store
 .mvn/wrapper/maven-wrapper.jar
+
+# internal working notes, never published
+docs/
+tasks/
