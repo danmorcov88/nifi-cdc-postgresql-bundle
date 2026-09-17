@@ -1,0 +1,471 @@
+{
+  "flowContents": {
+    "identifier": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6",
+    "instanceIdentifier": "ae118262-01a0-1000-9feb-0a13b2d0eefb",
+    "name": "CaptureChangePostgreSQL example",
+    "comments": "Captures changes from the lab database and queues them as JSON. Replace the funnel with your own consumer.",
+    "position": {
+      "x": 0.0,
+      "y": 0.0
+    },
+    "processGroups": [],
+    "remoteProcessGroups": [],
+    "processors": [
+      {
+        "identifier": "f6fc6b21-afe8-3b5e-8f07-4e0fbb1d01b6",
+        "instanceIdentifier": "ae525a8a-01a0-1000-725b-ee45ea01442f",
+        "name": "CaptureChangePostgreSQL",
+        "comments": "Set Password to the password of the nifi_cdc user.",
+        "position": {
+          "x": 100.0,
+          "y": 100.0
+        },
+        "type": "org.apache.nifi.cdc.postgresql.processors.CaptureChangePostgreSQL",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-cdc-postgresql-nar",
+          "version": "2.12.0"
+        },
+        "properties": {
+          "Replication Slot Name": "nifi_cdc_slot",
+          "Events Per FlowFile": "1000",
+          "Publication Name": "nifi_cdc_pub",
+          "Table Name Pattern": null,
+          "Port": "5432",
+          "Hostname": "postgres14",
+          "Batch Strategy": "MAX_EVENTS",
+          "SSL Mode": "DISABLED",
+          "Create Replication Slot": "true",
+          "Schema Name Pattern": null,
+          "Connection Timeout": "30 secs",
+          "SSL Context Service": null,
+          "Max Batch Wait Time": "10 secs",
+          "Database Name": "cdc_lab",
+          "Username": "nifi_cdc",
+          "WAL Retention Warning Threshold": null,
+          "Record Writer": "99721617-85a2-3548-8048-a539ac87ed16",
+          "Unchanged TOAST Placeholder": "__unchanged_toast_value__",
+          "Unchanged TOAST Value Strategy": "NULL"
+        },
+        "propertyDescriptors": {
+          "Replication Slot Name": {
+            "name": "Replication Slot Name",
+            "displayName": "Replication Slot Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Events Per FlowFile": {
+            "name": "Events Per FlowFile",
+            "displayName": "Events Per FlowFile",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Publication Name": {
+            "name": "Publication Name",
+            "displayName": "Publication Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Table Name Pattern": {
+            "name": "Table Name Pattern",
+            "displayName": "Table Name Pattern",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Port": {
+            "name": "Port",
+            "displayName": "Port",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Hostname": {
+            "name": "Hostname",
+            "displayName": "Hostname",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Batch Strategy": {
+            "name": "Batch Strategy",
+            "displayName": "Batch Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "SSL Mode": {
+            "name": "SSL Mode",
+            "displayName": "SSL Mode",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Create Replication Slot": {
+            "name": "Create Replication Slot",
+            "displayName": "Create Replication Slot",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Name Pattern": {
+            "name": "Schema Name Pattern",
+            "displayName": "Schema Name Pattern",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Connection Timeout": {
+            "name": "Connection Timeout",
+            "displayName": "Connection Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "SSL Context Service": {
+            "name": "SSL Context Service",
+            "displayName": "SSL Context Service",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Max Batch Wait Time": {
+            "name": "Max Batch Wait Time",
+            "displayName": "Max Batch Wait Time",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Database Name": {
+            "name": "Database Name",
+            "displayName": "Database Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Username": {
+            "name": "Username",
+            "displayName": "Username",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "WAL Retention Warning Threshold": {
+            "name": "WAL Retention Warning Threshold",
+            "displayName": "WAL Retention Warning Threshold",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Record Writer": {
+            "name": "Record Writer",
+            "displayName": "Record Writer",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Unchanged TOAST Placeholder": {
+            "name": "Unchanged TOAST Placeholder",
+            "displayName": "Unchanged TOAST Placeholder",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Unchanged TOAST Value Strategy": {
+            "name": "Unchanged TOAST Value Strategy",
+            "displayName": "Unchanged TOAST Value Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          }
+        },
+        "style": {},
+        "schedulingPeriod": "0 sec",
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "executionNode": "PRIMARY",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": [],
+        "scheduledState": "ENABLED",
+        "retryCount": 10,
+        "retriedRelationships": [],
+        "backoffMechanism": "PENALIZE_FLOWFILE",
+        "maxBackoffPeriod": "10 mins",
+        "componentType": "PROCESSOR",
+        "groupIdentifier": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6"
+      }
+    ],
+    "inputPorts": [],
+    "outputPorts": [],
+    "connections": [
+      {
+        "identifier": "ddf5b8f4-3ed1-34b9-8c8e-38a3ab74bde7",
+        "instanceIdentifier": "ae525ad4-01a0-1000-918c-c4ccf9b6c748",
+        "source": {
+          "id": "f6fc6b21-afe8-3b5e-8f07-4e0fbb1d01b6",
+          "type": "PROCESSOR",
+          "groupId": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6",
+          "name": "CaptureChangePostgreSQL",
+          "comments": "",
+          "instanceIdentifier": "ae525a8a-01a0-1000-725b-ee45ea01442f"
+        },
+        "destination": {
+          "id": "8ffaeb31-eab9-3683-abae-9dea45d55313",
+          "type": "FUNNEL",
+          "groupId": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6",
+          "name": "Funnel",
+          "comments": "",
+          "instanceIdentifier": "ae525ab4-01a0-1000-5a46-cc0ec8757202"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "success"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6"
+      }
+    ],
+    "labels": [],
+    "funnels": [
+      {
+        "identifier": "8ffaeb31-eab9-3683-abae-9dea45d55313",
+        "instanceIdentifier": "ae525ab4-01a0-1000-5a46-cc0ec8757202",
+        "position": {
+          "x": 100.0,
+          "y": 400.0
+        },
+        "componentType": "FUNNEL",
+        "groupIdentifier": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6"
+      }
+    ],
+    "controllerServices": [
+      {
+        "identifier": "99721617-85a2-3548-8048-a539ac87ed16",
+        "instanceIdentifier": "ae525a0f-01a0-1000-2b1e-57a5dca66dfd",
+        "name": "JsonRecordSetWriter",
+        "comments": "",
+        "type": "org.apache.nifi.json.JsonRecordSetWriter",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-record-serialization-services-nar",
+          "version": "2.12.0"
+        },
+        "properties": {
+          "Schema Branch": null,
+          "Schema Reference Reader": null,
+          "Schema Text": "${avro.schema}",
+          "Allow Scientific Notation": "false",
+          "Compression Level": "1",
+          "Output Grouping": "output-array",
+          "Schema Registry": null,
+          "Schema Access Strategy": "inherit-record-schema",
+          "Schema Name": "${schema.name}",
+          "Timestamp Format": null,
+          "Date Format": null,
+          "Pretty Print JSON": "true",
+          "Suppress Null Values": "suppress-missing",
+          "Schema Write Strategy": "no-schema",
+          "Serialized JSON Input Handling": "ENABLED",
+          "Compression Format": "none",
+          "Schema Cache": null,
+          "Schema Version": null,
+          "Time Format": null,
+          "Timestamp Representation": "AUTO",
+          "Schema Reference Writer": null
+        },
+        "propertyDescriptors": {
+          "Schema Branch": {
+            "name": "Schema Branch",
+            "displayName": "Schema Branch",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Reference Reader": {
+            "name": "Schema Reference Reader",
+            "displayName": "Schema Reference Reader",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Text": {
+            "name": "Schema Text",
+            "displayName": "Schema Text",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Allow Scientific Notation": {
+            "name": "Allow Scientific Notation",
+            "displayName": "Allow Scientific Notation",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Compression Level": {
+            "name": "Compression Level",
+            "displayName": "Compression Level",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Output Grouping": {
+            "name": "Output Grouping",
+            "displayName": "Output Grouping",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Registry": {
+            "name": "Schema Registry",
+            "displayName": "Schema Registry",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Access Strategy": {
+            "name": "Schema Access Strategy",
+            "displayName": "Schema Access Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Name": {
+            "name": "Schema Name",
+            "displayName": "Schema Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Timestamp Format": {
+            "name": "Timestamp Format",
+            "displayName": "Timestamp Format",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Date Format": {
+            "name": "Date Format",
+            "displayName": "Date Format",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Pretty Print JSON": {
+            "name": "Pretty Print JSON",
+            "displayName": "Pretty Print JSON",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Suppress Null Values": {
+            "name": "Suppress Null Values",
+            "displayName": "Suppress Null Values",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Write Strategy": {
+            "name": "Schema Write Strategy",
+            "displayName": "Schema Write Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Serialized JSON Input Handling": {
+            "name": "Serialized JSON Input Handling",
+            "displayName": "Serialized JSON Input Handling",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Compression Format": {
+            "name": "Compression Format",
+            "displayName": "Compression Format",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Cache": {
+            "name": "Schema Cache",
+            "displayName": "Schema Cache",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Version": {
+            "name": "Schema Version",
+            "displayName": "Schema Version",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Time Format": {
+            "name": "Time Format",
+            "displayName": "Time Format",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Timestamp Representation": {
+            "name": "Timestamp Representation",
+            "displayName": "Timestamp Representation",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Schema Reference Writer": {
+            "name": "Schema Reference Writer",
+            "displayName": "Schema Reference Writer",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          }
+        },
+        "controllerServiceApis": [
+          {
+            "type": "org.apache.nifi.serialization.RecordSetWriterFactory",
+            "bundle": {
+              "group": "org.apache.nifi",
+              "artifact": "nifi-standard-services-api-nar",
+              "version": "2.12.0"
+            }
+          }
+        ],
+        "scheduledState": "DISABLED",
+        "bulletinLevel": "WARN",
+        "componentType": "CONTROLLER_SERVICE",
+        "groupIdentifier": "72d0f701-03c0-39f2-a4a2-e90eae6d1ab6"
+      }
+    ],
+    "defaultFlowFileExpiration": "0 sec",
+    "defaultBackPressureObjectThreshold": 10000,
+    "defaultBackPressureDataSizeThreshold": "1 GB",
+    "scheduledState": "ENABLED",
+    "executionEngine": "INHERITED",
+    "maxConcurrentTasks": 1,
+    "statelessFlowTimeout": "1 min",
+    "flowFileConcurrency": "UNBOUNDED",
+    "flowFileOutboundPolicy": "STREAM_WHEN_AVAILABLE",
+    "componentType": "PROCESS_GROUP"
+  },
+  "externalControllerServices": {},
+  "parameterContexts": {},
+  "flowEncodingVersion": "1.0",
+  "parameterProviders": {},
+  "latest": false
+}

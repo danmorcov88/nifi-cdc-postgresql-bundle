@@ -47,6 +47,7 @@
                         <excludes combine.children="append">
                             <exclude>.gitattributes</exclude>
                             <exclude>docs/**</exclude>
+                            <exclude>examples/**/*.json</exclude>
                             <exclude>tasks/**</exclude>
                         </excludes>
                     </configuration>

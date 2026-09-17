@@ -14,25 +14,59 @@
 -->
 # NiFi PostgreSQL CDC Bundle
 
-`CaptureChangePostgreSQL`: an Apache NiFi 2.x processor that captures INSERT, UPDATE, DELETE and TRUNCATE events
-from PostgreSQL through logical replication with the built-in `pgoutput` plugin, and writes them as records.
+`CaptureChangePostgreSQL` is an Apache NiFi 2.x processor that captures INSERT, UPDATE, DELETE and TRUNCATE events
+from PostgreSQL through logical replication (`pgoutput`) and writes them as records with a Record Writer.
 
-Intended for contribution to Apache NiFi under [NIFI-4239](https://issues.apache.org/jira/browse/NIFI-4239).
-The module layout, build and coding conventions follow `nifi-extension-bundles/nifi-cdc` on the NiFi `main` branch.
-
-**Status:** work in progress. The processor captures and delivers changes (MVP); reconnection, integration tests
-and documentation are still being worked on.
+The module follows the layout and conventions of `nifi-extension-bundles/nifi-cdc` in Apache NiFi and is intended
+as a contribution for [NIFI-4239](https://issues.apache.org/jira/browse/NIFI-4239).
 
 ## Requirements
 
-- Java 21
-- Apache NiFi 2.12.0
-- PostgreSQL 14 or newer, with `wal_level = logical`
+- Apache NiFi 2.12.0, Java 21
+- PostgreSQL 14 or later with `wal_level = logical`
+- A database user with the `REPLICATION` privilege and a publication for the tables to capture
 
-## Releases
+## Installation
 
-Tagged versions are published on the [Releases](https://github.com/danmorcov88/nifi-cdc-postgresql-bundle/releases) page with
-the NAR attached. The NAR is named after the NiFi version it is built against (`nifi-cdc-postgresql-nar-2.12.0.nar`).
+1. Download `nifi-cdc-postgresql-nar-2.12.0.nar` from the [releases](https://github.com/danmorcov88/nifi-cdc-postgresql-bundle/releases)
+   or build it with `./mvnw package`.
+2. Copy the NAR into the `lib/` directory of NiFi (or into the NAR auto-load directory, `nar_extensions/` in the
+   Docker image) and start NiFi.
+3. Prepare the server:
+
+   ```sql
+   CREATE ROLE nifi_cdc WITH LOGIN REPLICATION PASSWORD '...';
+   CREATE PUBLICATION nifi_cdc_pub FOR TABLE inventory.products, inventory.orders;
+   GRANT SELECT ON inventory.products, inventory.orders TO nifi_cdc;
+   ```
+
+4. Add `CaptureChangePostgreSQL` to the canvas, set the connection properties, the publication, a slot name and a
+   Record Writer (for example `JsonRecordSetWriter`). The slot is created on first start.
+
+The processor documentation (Usage in the NiFi UI) describes the server settings, the record layout, the type
+mapping and the operational notes, in particular the write-ahead log that a replication slot retains while the
+processor is stopped.
+
+## Example flow
+
+[examples/capture-change-postgresql.json](examples/capture-change-postgresql.json) is a flow definition with the
+processor, a `JsonRecordSetWriter` and a funnel as placeholder for the consumer. Import it with *Upload* from the
+process group menu, enable the writer service and set the password of the database user.
+
+A record for an update of `inventory.products` looks like this:
+
+```json
+{
+  "operation": "update",
+  "schema": "inventory",
+  "table": "products",
+  "lsn": "0/1783488",
+  "xid": 775,
+  "commit_timestamp": 1789631150727,
+  "before": null,
+  "after": { "id": 600, "name": "Widget", "price": 2.00, "active": true }
+}
+```
 
 ## Build
 
@@ -43,13 +77,12 @@ the NAR attached. The NAR is named after the NiFi version it is built against (`
 ```
 
 The NAR is produced at `nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2.12.0.nar`.
-Copy it into the `lib/` directory (or the NAR auto-load directory, `nar_extensions/` in the Docker image) of a NiFi 2.12.0 installation.
 
 ## Development lab
 
-`docker-compose.yml` starts PostgreSQL 14 and 18 configured for logical replication (ports 5414 and 5418), with a
-replication user, two tables and a publication created by `docker/init/01-init.sql`. A NiFi 2.12.0 container that
-loads the built NAR is available under the `nifi` profile:
+`docker-compose.yml` starts PostgreSQL 14 and 18 configured for logical replication (ports 5414 and 5418) with a
+replication user, two tables and a publication (`docker/init/01-init.sql`), and a NiFi 2.12.0 container that loads
+the built NAR:
 
 ```
 docker compose up -d postgres14 postgres18
@@ -58,7 +91,12 @@ docker compose --profile nifi up -d          # https://localhost:8443/nifi  (adm
 ```
 
 `docker/capture-fixtures.sh` records pgoutput messages from both servers into
-`nifi-cdc-postgresql-processors/src/test/resources/pgoutput/`; the decoder unit tests run against these recordings.
+`nifi-cdc-postgresql-processors/src/test/resources/pgoutput/`; the decoder tests run against these recordings.
+
+## Status
+
+Working and covered by unit and integration tests. Not yet supported: initial snapshot of existing rows, pgoutput
+protocol version 2 (streaming of large transactions in progress), binary transfer mode.
 
 ## License
 
