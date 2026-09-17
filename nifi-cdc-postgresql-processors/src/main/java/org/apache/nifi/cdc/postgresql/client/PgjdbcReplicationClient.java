@@ -138,13 +138,14 @@ public class PgjdbcReplicationClient implements ReplicationClient {
 
     @Override
     public PGReplicationStream startReplicationStream(final String slotName, final String publicationName, final LogSequenceNumber startPosition,
-                                                      final Duration statusInterval) throws SQLException {
+                                                      final Duration statusInterval, final StreamOptions options) throws SQLException {
         final ChainedLogicalStreamBuilder builder = getPgConnection().getReplicationAPI()
                 .replicationStream()
                 .logical()
                 .withSlotName(slotName)
                 .withSlotOption("proto_version", PROTOCOL_VERSION)
                 .withSlotOption("publication_names", publicationName)
+                .withSlotOption("binary", options.binary())
                 .withStatusInterval((int) statusInterval.toMillis(), TimeUnit.MILLISECONDS)
                 // the processor decides which positions are confirmed; the driver must not advance them on its own
                 .withAutomaticFlush(false);

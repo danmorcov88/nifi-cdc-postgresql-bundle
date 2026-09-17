@@ -179,17 +179,41 @@ abstract class AbstractCaptureChangePostgreSQLIT {
     @Test
     void testDataTypes() throws Exception {
         start(runner);
+        insertTypeSamples();
+
+        assertTypeSamples(collect(runner, 3), "insert");
+    }
+
+    @Test
+    void testDataTypesInBinaryFormat() throws Exception {
+        runner.setProperty(CaptureChangePostgreSQL.TRANSFER_FORMAT, TransferFormat.BINARY);
+        start(runner);
+        insertTypeSamples();
+
+        final List<JsonNode> events = collect(runner, 3);
+
+        assertTypeSamples(events, "insert", true);
+        assertEquals(7, runner.getLogger().getWarnMessages().size(), "four columns without binary mapping, three columns with unsupported values");
+    }
+
+    private void insertTypeSamples() throws SQLException {
         execute("INSERT INTO lab.type_samples VALUES (1, -32768, 9223372036854775807, 12345.678, 0.1234567890123456789, 1.5, 2.25, TRUE, "
                         + "'text with ünïcödé', 'varchar', 'ab', DATE '2026-09-17', TIME '13:45:30.123456', TIMESTAMP '2026-09-17 13:45:30.5', "
                         + "TIMESTAMPTZ '2026-09-17 13:45:30+02', '123e4567-e89b-12d3-a456-426614174000', '{\"a\": 1}', '{\"b\": [true, null]}', "
                         + "'\\x00ff10', ARRAY[1, 2, 3], 'happy', INTERVAL '1 day 02:03:04', TIME WITH TIME ZONE '10:00:00+05:30')",
                 "INSERT INTO lab.type_samples (id) VALUES (2)",
                 "INSERT INTO lab.type_samples (id, c_numeric_free, c_float8, c_date) VALUES (3, 'NaN', 'Infinity', 'infinity')");
-
-        assertTypeSamples(collect(runner, 3), "insert");
     }
 
     private void assertTypeSamples(final List<JsonNode> events, final String operation) {
+        assertTypeSamples(events, operation, false);
+    }
+
+    /**
+     * @param binary whether the values were transferred in binary format, in which case the types without binary mapping
+     *               are hexadecimal strings
+     */
+    private void assertTypeSamples(final List<JsonNode> events, final String operation, final boolean binary) {
         assertEquals(operation, events.get(0).get("operation").asText());
         final JsonNode row = events.get(0).get("after");
         assertEquals(-32768, row.get("c_int2").asInt());
@@ -208,10 +232,17 @@ abstract class AbstractCaptureChangePostgreSQLIT {
         assertEquals("{\"a\": 1}", row.get("c_json").asText());
         assertEquals("{\"b\": [true, null]}", row.get("c_jsonb").asText());
         assertEquals(List.of(0, -1, 16), OBJECT_MAPPER.convertValue(row.get("c_bytea"), List.class));
-        assertEquals("{1,2,3}", row.get("c_int_array").asText());
-        assertEquals("happy", row.get("c_mood").asText());
-        assertEquals("1 day 02:03:04", row.get("c_interval").asText());
-        assertEquals("10:00:00+05:30", row.get("c_timetz").asText());
+        if (binary) {
+            assertEquals("\\x0000000100000000000000170000000300000001000000040000000100000004000000020000000400000003", row.get("c_int_array").asText());
+            assertEquals("\\x6861707079", row.get("c_mood").asText());
+            assertEquals("\\x00000001b81ee6000000000100000000", row.get("c_interval").asText());
+            assertEquals("\\x0000000861c46800ffffb2a8", row.get("c_timetz").asText());
+        } else {
+            assertEquals("{1,2,3}", row.get("c_int_array").asText());
+            assertEquals("happy", row.get("c_mood").asText());
+            assertEquals("1 day 02:03:04", row.get("c_interval").asText());
+            assertEquals("10:00:00+05:30", row.get("c_timetz").asText());
+        }
 
         final JsonNode nulls = events.get(1).get("after");
         assertEquals(2, nulls.get("id").asInt());
@@ -222,7 +253,8 @@ abstract class AbstractCaptureChangePostgreSQLIT {
         assertTrue(specials.get("c_numeric_free").isNull(), "NaN has no decimal representation");
         assertTrue(specials.get("c_date").isNull(), "infinity has no date representation");
         assertTrue(specials.get("c_float8").isNull(), "Infinity cannot be serialized by the record writers");
-        assertEquals(3, runner.getLogger().getWarnMessages().size(), "one warning per column with unsupported values");
+        assertEquals(3, runner.getLogger().getWarnMessages().stream().filter(message -> message.getMsg().contains("cannot be represented")).count(),
+                "one warning per column with unsupported values");
     }
 
     @Test

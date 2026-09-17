@@ -84,9 +84,10 @@ public interface ReplicationClient extends AutoCloseable {
      * @param publicationName publication whose tables are streamed
      * @param startPosition position to resume from, or null to resume from the position confirmed on the slot
      * @param statusInterval how often the driver reports the confirmed position to the server
+     * @param options pgoutput options
      */
-    PGReplicationStream startReplicationStream(String slotName, String publicationName, LogSequenceNumber startPosition, Duration statusInterval)
-            throws SQLException;
+    PGReplicationStream startReplicationStream(String slotName, String publicationName, LogSequenceNumber startPosition, Duration statusInterval,
+                                               StreamOptions options) throws SQLException;
 
     @Override
     void close() throws SQLException;

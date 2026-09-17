@@ -136,6 +136,11 @@ not change. `Unchanged TOAST Value Strategy` selects how such columns appear in 
 `NaN` and `Infinity` in numeric and floating point columns, and `infinity` or BC values in date and timestamp
 columns, cannot be written by the record writers. They are written as null and a warning is logged once per column.
 
+With `Transfer Format` set to `Binary`, the server sends values in the binary format of their type instead of text,
+which saves the text conversion on both sides. The types of the table above are decoded to the same values as in
+text format. The server sends every other type in binary as well; those values are written as hexadecimal strings
+(`\x...`) with a warning once per column, so keep the text format for tables with columns of such types.
+
 ## Notes
 
 - Keep the run schedule of the processor at `0 sec`. Status updates to the server are sent while the processor runs;

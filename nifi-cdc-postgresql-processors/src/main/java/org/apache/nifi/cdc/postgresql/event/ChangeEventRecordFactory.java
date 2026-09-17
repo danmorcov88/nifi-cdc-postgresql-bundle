@@ -125,6 +125,7 @@ public class ChangeEventRecordFactory {
             switch (value.kind()) {
                 case NULL -> values.put(column.name(), null);
                 case TEXT -> values.put(column.name(), convert(relation, column, value.text()));
+                case BINARY -> values.put(column.name(), convertBinary(relation, column, value.binary()));
                 case UNCHANGED_TOAST -> putUnchangedToast(values, column);
             }
         }
@@ -135,13 +136,38 @@ public class ChangeEventRecordFactory {
         try {
             return typeMapper.convert(column, text);
         } catch (final UnsupportedValueException e) {
-            final String qualifiedColumn = String.format("%s.%s.%s", relation.namespace(), relation.name(), column.name());
-            if (reportedColumns.add(qualifiedColumn)) {
-                warningHandler.accept(String.format("Column %s holds the value [%s], which cannot be represented in the mapped record type; "
-                        + "such values are written as null (reported once per column)", qualifiedColumn, e.getText()));
-            }
+            reportUnsupportedValue(relation, column, e);
             return null;
         }
+    }
+
+    private Object convertBinary(final RelationMessage relation, final RelationColumn column, final byte[] bytes) {
+        if (!typeMapper.hasBinaryMapping(column)) {
+            final String qualifiedColumn = qualifiedName(relation, column);
+            if (reportedColumns.add(qualifiedColumn)) {
+                warningHandler.accept(String.format("Column %s (type OID %d) has no binary mapping; its values are written as hexadecimal "
+                        + "strings. Use the text transfer format to get their text representation (reported once per column)",
+                        qualifiedColumn, column.typeId()));
+            }
+        }
+        try {
+            return typeMapper.convert(column, bytes);
+        } catch (final UnsupportedValueException e) {
+            reportUnsupportedValue(relation, column, e);
+            return null;
+        }
+    }
+
+    private void reportUnsupportedValue(final RelationMessage relation, final RelationColumn column, final UnsupportedValueException e) {
+        final String qualifiedColumn = qualifiedName(relation, column);
+        if (reportedColumns.add(qualifiedColumn)) {
+            warningHandler.accept(String.format("Column %s holds the value [%s], which cannot be represented in the mapped record type; "
+                    + "such values are written as null (reported once per column)", qualifiedColumn, e.getText()));
+        }
+    }
+
+    private static String qualifiedName(final RelationMessage relation, final RelationColumn column) {
+        return String.format("%s.%s.%s", relation.namespace(), relation.name(), column.name());
     }
 
     private void putUnchangedToast(final Map<String, Object> values, final RelationColumn column) {

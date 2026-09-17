@@ -266,12 +266,21 @@ class PgOutputDecoderTest {
     }
 
     @Test
-    void testDecodeBinaryColumnValueNotSupported() {
-        final ByteBuffer buffer = new MessageBuilder('I').int32(RELATION_ID).int8('N').int16(1).int8('b').int32(1).int8(0).build();
+    void testDecodeBinaryColumnValue() {
+        final ByteBuffer buffer = new MessageBuilder('I').int32(RELATION_ID).int8('N').int16(2).int8('b').int32(4).int32(-5).int8('n').build();
+
+        final InsertMessage insert = (InsertMessage) decoder.decode(buffer);
+
+        assertEquals(List.of(ColumnValue.binary(new byte[]{(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFB}), ColumnValue.NULL), insert.newTuple().columns());
+    }
+
+    @Test
+    void testDecodeUnknownColumnValueKind() {
+        final ByteBuffer buffer = new MessageBuilder('I').int32(RELATION_ID).int8('N').int16(1).int8('x').int32(1).int8(0).build();
 
         final PgOutputException exception = assertThrows(PgOutputException.class, () -> decoder.decode(buffer));
 
-        assertTrue(exception.getMessage().contains("[b]"));
+        assertTrue(exception.getMessage().contains("[x]"));
     }
 
     @Test

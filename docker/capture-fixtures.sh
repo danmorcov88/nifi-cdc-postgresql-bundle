@@ -14,19 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Records pgoutput messages (protocol version 1, text tuples) from the lab containers into
-# nifi-cdc-postgresql-processors/src/test/resources/pgoutput/<server>/<scenario>.hex, one hex-encoded
-# message per line. Requires `docker compose up -d postgres14 postgres18`.
+# Records pgoutput messages (protocol version 1) from the lab containers into
+# nifi-cdc-postgresql-processors/src/test/resources/pgoutput/<server>/<scenario>.hex (text tuples) and
+# <server>-binary/<scenario>.hex (binary tuples), one hex-encoded message per line.
+# Requires `docker compose up -d postgres14 postgres18`. Pass the target directories to record as arguments
+# to limit the run, for example `pg14-binary pg18-binary`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 OUT=nifi-cdc-postgresql-processors/src/test/resources/pgoutput
 SLOT=fixture_capture
 
-for target in cdc-postgres14:pg14 cdc-postgres18:pg18; do
+for target in cdc-postgres14:pg14 cdc-postgres18:pg18 cdc-postgres14:pg14-binary cdc-postgres18:pg18-binary; do
     container=${target%%:*}
-    dir=$OUT/${target##*:}
+    name=${target##*:}
+    if [ $# -gt 0 ] && [[ " $* " != *" $name "* ]]; then
+        continue
+    fi
+    dir=$OUT/$name
     mkdir -p "$dir"
+    case $name in
+        *-binary) binary=true ;;
+        *) binary=false ;;
+    esac
 
     sql() {
         docker exec -i "$container" psql -U postgres -d cdc_lab -v ON_ERROR_STOP=1 -Atq "$@"
@@ -38,9 +48,9 @@ for target in cdc-postgres14:pg14 cdc-postgres18:pg18; do
         local statements=$2
         sql -c "SELECT pg_create_logical_replication_slot('$SLOT', 'pgoutput')" > /dev/null
         sql -c "$statements" > /dev/null
-        sql -c "SELECT encode(data, 'hex') FROM pg_logical_slot_get_binary_changes('$SLOT', NULL, NULL, 'proto_version', '1', 'publication_names', 'nifi_cdc_pub')" > "$dir/$name.hex"
+        sql -c "SELECT encode(data, 'hex') FROM pg_logical_slot_get_binary_changes('$SLOT', NULL, NULL, 'proto_version', '1', 'publication_names', 'nifi_cdc_pub', 'binary', '$binary')" > "$dir/$name.hex"
         sql -c "SELECT pg_drop_replication_slot('$SLOT')" > /dev/null
-        printf '%-8s %-32s %3d messages\n' "${target##*:}" "$name" "$(wc -l < "$dir/$name.hex")"
+        printf '%-12s %-32s %3d messages\n' "${target##*:}" "$name" "$(wc -l < "$dir/$name.hex")"
     }
 
     sql -c "SELECT pg_drop_replication_slot('$SLOT') FROM pg_replication_slots WHERE slot_name = '$SLOT'" > /dev/null

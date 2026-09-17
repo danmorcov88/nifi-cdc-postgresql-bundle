@@ -25,7 +25,7 @@ import java.util.List;
 
 /**
  * Decoder for the binary messages of the pgoutput logical decoding plugin, protocol version 1 with tuples in text
- * format, as documented in the "Logical Replication Message Formats" chapter of the PostgreSQL manual.
+ * or binary format, as documented in the "Logical Replication Message Formats" chapter of the PostgreSQL manual.
  * The decoder is stateless: one call decodes exactly one message and fails when bytes remain after it.
  */
 public class PgOutputDecoder {
@@ -47,6 +47,7 @@ public class PgOutputDecoder {
     private static final byte COLUMN_NULL = 'n';
     private static final byte COLUMN_UNCHANGED_TOAST = 'u';
     private static final byte COLUMN_TEXT = 't';
+    private static final byte COLUMN_BINARY = 'b';
 
     private static final byte COLUMN_KEY_FLAG = 1;
     private static final byte TRUNCATE_CASCADE_FLAG = 1;
@@ -194,19 +195,22 @@ public class PgOutputDecoder {
             switch (kind) {
                 case COLUMN_NULL -> columns.add(ColumnValue.NULL);
                 case COLUMN_UNCHANGED_TOAST -> columns.add(ColumnValue.UNCHANGED_TOAST);
-                case COLUMN_TEXT -> {
-                    final int length = buffer.getInt();
-                    if (length < 0 || length > buffer.remaining()) {
-                        throw new PgOutputException(String.format("Invalid column value length [%d] with %d bytes remaining", length, buffer.remaining()));
-                    }
-                    final byte[] bytes = new byte[length];
-                    buffer.get(bytes);
-                    columns.add(ColumnValue.text(new String(bytes, StandardCharsets.UTF_8)));
-                }
-                default -> throw new PgOutputException(String.format("Unsupported column value kind [%c]; only text format tuples are supported", (char) kind));
+                case COLUMN_TEXT -> columns.add(ColumnValue.text(new String(readColumnBytes(buffer), StandardCharsets.UTF_8)));
+                case COLUMN_BINARY -> columns.add(ColumnValue.binary(readColumnBytes(buffer)));
+                default -> throw new PgOutputException(String.format("Unsupported column value kind [%c]", (char) kind));
             }
         }
         return new TupleData(columns);
+    }
+
+    private byte[] readColumnBytes(final ByteBuffer buffer) {
+        final int length = buffer.getInt();
+        if (length < 0 || length > buffer.remaining()) {
+            throw new PgOutputException(String.format("Invalid column value length [%d] with %d bytes remaining", length, buffer.remaining()));
+        }
+        final byte[] bytes = new byte[length];
+        buffer.get(bytes);
+        return bytes;
     }
 
     private void expectTupleKind(final byte actual, final byte expected) {

@@ -22,6 +22,7 @@ import org.apache.nifi.cdc.postgresql.client.ConnectionSettings;
 import org.apache.nifi.cdc.postgresql.client.ReplicationClient;
 import org.apache.nifi.cdc.postgresql.client.ReplicationSlot;
 import org.apache.nifi.cdc.postgresql.client.SSLMode;
+import org.apache.nifi.cdc.postgresql.client.StreamOptions;
 import org.apache.nifi.cdc.postgresql.event.UnchangedToastStrategy;
 import org.apache.nifi.cdc.postgresql.pgoutput.ColumnValue;
 import org.apache.nifi.cdc.postgresql.pgoutput.CommitMessage;
@@ -477,6 +478,31 @@ class CaptureChangePostgreSQLTest {
         client.replicationPrivilege = false;
 
         assertSetupFails("REPLICATION");
+    }
+
+    @Test
+    void testBinaryTransferFormat() {
+        runner.setProperty(CaptureChangePostgreSQL.TRANSFER_FORMAT, TransferFormat.BINARY);
+        client.addMessages(PgOutputFixtures.load(SERVER + "-binary", "insert-customers"));
+        client.addMessages(PgOutputFixtures.load(SERVER + "-binary", "types-insert"));
+
+        runner.run();
+
+        assertEquals(List.of(new StreamOptions(true)), client.streamOptions);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 2);
+        final List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS);
+        final String customers = flowFiles.get(0).getContent();
+        assertTrue(customers.contains("insert,lab,customers,"), customers);
+        assertTrue(customers.contains("name=Fixture One"), customers);
+        assertTrue(customers.contains("balance=10.50"), customers);
+        assertTrue(customers.contains("active=true"), customers);
+        final String types = flowFiles.get(1).getContent();
+        assertTrue(types.contains("c_int8=9223372036854775807"), types);
+        assertTrue(types.contains("c_uuid=123e4567-e89b-12d3-a456-426614174000"), types);
+        assertTrue(types.contains("c_mood=\\x6861707079"), types);
+        assertTrue(types.contains("c_numeric_free=null"), types);
+        assertEquals(8, runner.getLogger().getWarnMessages().size(), "four columns without binary mapping, four unrepresentable values");
+        assertTrue(runner.getLogger().getWarnMessages().stream().anyMatch(message -> message.getMsg().contains("lab.type_samples.c_int_array") && message.getMsg().contains("no binary mapping")));
     }
 
     @Test

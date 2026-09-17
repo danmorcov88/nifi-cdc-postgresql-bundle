@@ -114,13 +114,13 @@ docker compose up -d postgres14 postgres18
 docker compose --profile nifi up -d          # https://localhost:8443/nifi  (admin / adminadminadmin)
 ```
 
-`docker/capture-fixtures.sh` records pgoutput messages from both servers into
+`docker/capture-fixtures.sh` records pgoutput messages from both servers, in text and in binary format, into
 `nifi-cdc-postgresql-processors/src/test/resources/pgoutput/`; the decoder tests run against these recordings.
 
 ## Status
 
 Working and covered by unit and integration tests. Not yet supported: pgoutput protocol version 2 (streaming of
-large transactions in progress), binary transfer mode.
+large transactions in progress).
 
 ## License
 

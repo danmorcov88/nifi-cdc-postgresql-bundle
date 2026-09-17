@@ -37,14 +37,14 @@ import java.util.UUID;
 
 /**
  * Maps PostgreSQL data types, identified by their OID in Relation messages, to NiFi record data types, and converts
- * the text representation sent by pgoutput into the matching Java values. Temporal values use the {@code java.sql}
- * classes, as the JDBC based record readers of NiFi do.
+ * the text or binary representation sent by pgoutput into the matching Java values. Temporal values use the
+ * {@code java.sql} classes, as the JDBC based record readers of NiFi do.
  * <p>
  * Types without a dedicated mapping (arrays, intervals, ranges, geometric types, user-defined types, ...) are
- * mapped to strings and keep their PostgreSQL text representation. Special values that have no Java equivalent
- * in the mapped type, or that the record writers of NiFi cannot serialize ({@code NaN} and {@code Infinity} for
- * numeric and floating point columns, {@code infinity} and BC dates for temporal types), are reported through
- * {@link UnsupportedValueException}.
+ * mapped to strings and keep their PostgreSQL text representation; in binary format their values become
+ * hexadecimal strings. Special values that have no Java equivalent in the mapped type, or that the record writers
+ * of NiFi cannot serialize ({@code NaN} and {@code Infinity} for numeric and floating point columns, {@code infinity}
+ * and BC dates for temporal types), are reported through {@link UnsupportedValueException}.
  */
 public class PostgreSQLTypeMapper {
 
@@ -92,6 +92,8 @@ public class PostgreSQLTypeMapper {
             .appendOffset("+HH:mm:ss", "Z")
             .toFormatter();
 
+    private final BinaryValueDecoder binaryDecoder = new BinaryValueDecoder();
+
     /**
      * @param column column description from the Relation message
      * @return the NiFi data type for the column
@@ -137,6 +139,25 @@ public class PostgreSQLTypeMapper {
             case OID_BYTEA -> convertBytea(text);
             default -> text;
         };
+    }
+
+    /**
+     * Convert the binary representation of a value to the Java type matching {@link #getDataType(RelationColumn)}.
+     *
+     * @param column column description from the Relation message
+     * @param bytes binary representation as sent by pgoutput with the binary option, not null
+     * @return the converted value, or a hexadecimal string for a type without binary mapping
+     * @throws UnsupportedValueException when the value cannot be represented in the mapped record type
+     */
+    public Object convert(final RelationColumn column, final byte[] bytes) {
+        return binaryDecoder.decode(column, bytes);
+    }
+
+    /**
+     * @return whether binary values of the column type are decoded, rather than written as hexadecimal strings
+     */
+    public boolean hasBinaryMapping(final RelationColumn column) {
+        return binaryDecoder.hasMapping(column.typeId());
     }
 
     private DataType getNumericDataType(final int typeModifier) {
@@ -191,11 +212,14 @@ public class PostgreSQLTypeMapper {
      */
     private Object convertTime(final RelationColumn column, final String text) {
         try {
-            final LocalTime time = LocalTime.parse(text);
-            return new Time(Time.valueOf(time).getTime() + time.getNano() / NANOS_PER_MILLI);
+            return toSqlTime(LocalTime.parse(text));
         } catch (final DateTimeParseException e) {
             throw new UnsupportedValueException(column, text);
         }
+    }
+
+    static Time toSqlTime(final LocalTime time) {
+        return new Time(Time.valueOf(time).getTime() + time.getNano() / NANOS_PER_MILLI);
     }
 
     private Object convertTimestamp(final RelationColumn column, final String text) {
@@ -219,9 +243,12 @@ public class PostgreSQLTypeMapper {
      * The result is boxed because NiFi represents binary values as arrays of {@link Byte}.
      */
     private Byte[] convertBytea(final String text) {
-        final byte[] bytes = text.startsWith(BYTEA_HEX_PREFIX)
+        return box(text.startsWith(BYTEA_HEX_PREFIX)
                 ? HexFormat.of().parseHex(text, BYTEA_HEX_PREFIX.length(), text.length())
-                : decodeByteaEscapeFormat(text);
+                : decodeByteaEscapeFormat(text));
+    }
+
+    static Byte[] box(final byte[] bytes) {
         final Byte[] boxed = new Byte[bytes.length];
         for (int i = 0; i < bytes.length; i++) {
             boxed[i] = bytes[i];

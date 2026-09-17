@@ -22,6 +22,7 @@ import org.apache.nifi.cdc.postgresql.client.ReplicationSlot;
 import org.apache.nifi.cdc.postgresql.client.SlotCreation;
 import org.apache.nifi.cdc.postgresql.client.SnapshotConnection;
 import org.apache.nifi.cdc.postgresql.client.SnapshotCursor;
+import org.apache.nifi.cdc.postgresql.client.StreamOptions;
 import org.apache.nifi.cdc.postgresql.pgoutput.RelationMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
 import org.postgresql.replication.LogSequenceNumber;
@@ -66,6 +67,7 @@ class FakeReplicationClient implements ReplicationClient {
     final List<String> openedSnapshots = new ArrayList<>();
     FakeSnapshotConnection snapshotConnection;
     final List<LogSequenceNumber> streamStartPositions = new ArrayList<>();
+    final List<StreamOptions> streamOptions = new ArrayList<>();
     final Deque<ByteBuffer> pendingMessages = new ArrayDeque<>();
     /** Thrown by the stream once the pending messages are exhausted, when set. */
     SQLException readFailure;
@@ -150,8 +152,9 @@ class FakeReplicationClient implements ReplicationClient {
 
     @Override
     public PGReplicationStream startReplicationStream(final String slotName, final String publicationName, final LogSequenceNumber startPosition,
-                                                      final Duration statusInterval) {
+                                                      final Duration statusInterval, final StreamOptions options) {
         streamStartPositions.add(startPosition);
+        streamOptions.add(options);
         stream = new FakeReplicationStream();
         return stream;
     }

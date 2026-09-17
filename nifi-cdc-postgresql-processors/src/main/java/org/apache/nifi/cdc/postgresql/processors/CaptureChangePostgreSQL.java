@@ -34,6 +34,7 @@ import org.apache.nifi.cdc.postgresql.client.SSLContextRegistry;
 import org.apache.nifi.cdc.postgresql.client.SSLMode;
 import org.apache.nifi.cdc.postgresql.client.SlotCreation;
 import org.apache.nifi.cdc.postgresql.client.SnapshotConnection;
+import org.apache.nifi.cdc.postgresql.client.StreamOptions;
 import org.apache.nifi.cdc.postgresql.event.ChangeEventRecordFactory;
 import org.apache.nifi.cdc.postgresql.event.ChangeOperation;
 import org.apache.nifi.cdc.postgresql.event.TransactionInfo;
@@ -239,6 +240,16 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             .dependsOn(INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION)
             .build();
 
+    public static final PropertyDescriptor TRANSFER_FORMAT = new PropertyDescriptor.Builder()
+            .name("Transfer Format")
+            .description("Format in which the server sends column values. Binary avoids the text conversion on the server and in the "
+                    + "processor for the types of the mapping table; values of other types (arrays, intervals, enums, ...) are then written "
+                    + "as hexadecimal strings, so Text is the right choice for tables with such columns.")
+            .required(true)
+            .allowableValues(TransferFormat.class)
+            .defaultValue(TransferFormat.TEXT)
+            .build();
+
     public static final PropertyDescriptor SCHEMA_NAME_PATTERN = new PropertyDescriptor.Builder()
             .name("Schema Name Pattern")
             .description("Regular expression that the schema of a table must match for its changes to be written. When not set, changes of all "
@@ -344,6 +355,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             CREATE_REPLICATION_SLOT,
             INITIAL_SNAPSHOT,
             SNAPSHOT_FETCH_SIZE,
+            TRANSFER_FORMAT,
             SCHEMA_NAME_PATTERN,
             TABLE_NAME_PATTERN,
             RECORD_WRITER,
@@ -387,6 +399,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     /** Whether the snapshot of the slot has not been completed yet; while true, triggers read the snapshot instead of the stream. */
     private volatile boolean snapshotPending;
     private InitialSnapshotMode initialSnapshotMode;
+    private StreamOptions streamOptions;
     private int snapshotFetchSize;
     private int snapshotRowsPerBatch;
     private ConnectionSettings connectionSettings;
@@ -446,6 +459,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         maxBatchWaitMillis = batchStrategy == BatchStrategy.MAX_EVENTS
                 ? context.getProperty(MAX_BATCH_WAIT_TIME).evaluateAttributeExpressions().asTimePeriod(TimeUnit.MILLISECONDS) : 0;
         initialSnapshotMode = context.getProperty(INITIAL_SNAPSHOT).asAllowableValue(InitialSnapshotMode.class);
+        streamOptions = new StreamOptions(context.getProperty(TRANSFER_FORMAT).asAllowableValue(TransferFormat.class) == TransferFormat.BINARY);
         snapshotFetchSize = initialSnapshotMode == InitialSnapshotMode.ON_SLOT_CREATION
                 ? context.getProperty(SNAPSHOT_FETCH_SIZE).evaluateAttributeExpressions().asInteger() : 0;
         // with one transaction per FlowFile, a table of the snapshot is one FlowFile
@@ -792,7 +806,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             final long startLsn = confirmedLsn.get();
             final LogSequenceNumber startPosition = startLsn == INVALID_LSN ? null : LogSequenceNumber.valueOf(startLsn);
             relationCache.clear();
-            stream = client.startReplicationStream(slotName, publicationName, startPosition, STATUS_INTERVAL);
+            stream = client.startReplicationStream(slotName, publicationName, startPosition, STATUS_INTERVAL, streamOptions);
             streamFlushedLsn = INVALID_LSN;
             getLogger().info("Started replication stream from {} on slot [{}] at position {}", transitUri, slotName,
                     startPosition == null ? "of the slot" : startPosition);
