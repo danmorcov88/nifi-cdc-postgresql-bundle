@@ -14,29 +14,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.cdc.postgresql.event;
+package org.apache.nifi.cdc.postgresql.client;
+
+import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
+
+import java.sql.SQLException;
 
 /**
- * Kind of change captured for a table row.
+ * Rows of one table read within a snapshot transaction.
  */
-public enum ChangeOperation {
-    INSERT("insert"),
-    UPDATE("update"),
-    DELETE("delete"),
-    TRUNCATE("truncate"),
-    /** A row that existed when the replication slot was created, read by the initial snapshot. */
-    SNAPSHOT("snapshot");
-
-    private final String value;
-
-    ChangeOperation(final String value) {
-        this.value = value;
-    }
+public interface SnapshotCursor extends AutoCloseable {
 
     /**
-     * @return value written in the {@code operation} field of a change event record
+     * @return the next row in the column order of the table, or null when all rows have been read
      */
-    public String getValue() {
-        return value;
-    }
+    TupleData next() throws SQLException;
+
+    @Override
+    void close() throws SQLException;
 }

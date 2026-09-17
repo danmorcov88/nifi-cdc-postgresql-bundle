@@ -56,6 +56,16 @@ public record ConnectionSettings(String hostname, int port, String database, Str
     }
 
     /**
+     * @return driver properties for the connection that reads the initial snapshot: values are transferred in text format,
+     *         so that they are read exactly as the output functions print them, as in pgoutput messages
+     */
+    public Properties getSnapshotProperties() {
+        final Properties properties = getProperties();
+        PGProperty.BINARY_TRANSFER.set(properties, false);
+        return properties;
+    }
+
+    /**
      * @return driver properties for a regular connection, used for catalog queries while the replication connection is streaming
      */
     public Properties getProperties() {

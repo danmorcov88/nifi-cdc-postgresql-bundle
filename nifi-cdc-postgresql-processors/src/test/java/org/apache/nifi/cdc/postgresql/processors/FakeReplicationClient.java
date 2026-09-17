@@ -19,6 +19,11 @@ package org.apache.nifi.cdc.postgresql.processors;
 import org.apache.nifi.cdc.postgresql.client.PgjdbcReplicationClient;
 import org.apache.nifi.cdc.postgresql.client.ReplicationClient;
 import org.apache.nifi.cdc.postgresql.client.ReplicationSlot;
+import org.apache.nifi.cdc.postgresql.client.SlotCreation;
+import org.apache.nifi.cdc.postgresql.client.SnapshotConnection;
+import org.apache.nifi.cdc.postgresql.client.SnapshotCursor;
+import org.apache.nifi.cdc.postgresql.pgoutput.RelationMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
 import org.postgresql.replication.LogSequenceNumber;
 import org.postgresql.replication.PGReplicationStream;
 
@@ -30,6 +35,8 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,6 +57,14 @@ class FakeReplicationClient implements ReplicationClient {
     final Set<String> publications = new HashSet<>(Set.of(PUBLICATION));
     final Map<String, ReplicationSlot> slots = new HashMap<>();
     final List<String> createdSlots = new ArrayList<>();
+    final List<String> droppedSlots = new ArrayList<>();
+    /** Tables and rows served by the snapshot of a newly created slot, in publication order. */
+    final Map<RelationMessage, List<TupleData>> snapshotTables = new LinkedHashMap<>();
+    /** Thrown by the snapshot cursor after this many rows have been read, when set. */
+    SQLException snapshotFailure;
+    int snapshotFailureAfterRows;
+    final List<String> openedSnapshots = new ArrayList<>();
+    FakeSnapshotConnection snapshotConnection;
     final List<LogSequenceNumber> streamStartPositions = new ArrayList<>();
     final Deque<ByteBuffer> pendingMessages = new ArrayDeque<>();
     /** Thrown by the stream once the pending messages are exhausted, when set. */
@@ -111,11 +126,26 @@ class FakeReplicationClient implements ReplicationClient {
     }
 
     @Override
-    public LogSequenceNumber createReplicationSlot(final String slotName) {
+    public SlotCreation createReplicationSlot(final String slotName) {
         createdSlots.add(slotName);
         final LogSequenceNumber consistentPoint = LogSequenceNumber.valueOf("0/2000");
         slots.put(slotName, new ReplicationSlot(slotName, PgjdbcReplicationClient.OUTPUT_PLUGIN, DATABASE, false, consistentPoint));
-        return consistentPoint;
+        return new SlotCreation(consistentPoint, "00000003-0000001B-" + createdSlots.size());
+    }
+
+    @Override
+    public void dropReplicationSlot(final String slotName) throws SQLException {
+        if (slots.remove(slotName) == null) {
+            throw new SQLException(String.format("replication slot \"%s\" does not exist", slotName));
+        }
+        droppedSlots.add(slotName);
+    }
+
+    @Override
+    public SnapshotConnection openSnapshot(final String snapshotName) {
+        openedSnapshots.add(snapshotName);
+        snapshotConnection = new FakeSnapshotConnection();
+        return snapshotConnection;
     }
 
     @Override
@@ -129,6 +159,49 @@ class FakeReplicationClient implements ReplicationClient {
     @Override
     public void close() {
         closed = true;
+    }
+
+    class FakeSnapshotConnection implements SnapshotConnection {
+
+        boolean closed;
+        int openCursors;
+        int rowsRead;
+
+        @Override
+        public List<RelationMessage> listTables(final String publicationName) {
+            return List.copyOf(snapshotTables.keySet());
+        }
+
+        @Override
+        public SnapshotCursor openCursor(final RelationMessage table, final int fetchSize) {
+            openCursors++;
+            final Iterator<TupleData> rows = snapshotTables.get(table).iterator();
+            return new SnapshotCursor() {
+                @Override
+                public TupleData next() throws SQLException {
+                    if (snapshotFailure != null && rowsRead >= snapshotFailureAfterRows) {
+                        final SQLException failure = snapshotFailure;
+                        snapshotFailure = null;
+                        throw failure;
+                    }
+                    if (!rows.hasNext()) {
+                        return null;
+                    }
+                    rowsRead++;
+                    return rows.next();
+                }
+
+                @Override
+                public void close() {
+                    openCursors--;
+                }
+            };
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
     }
 
     /**

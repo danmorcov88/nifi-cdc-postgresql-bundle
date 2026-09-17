@@ -19,6 +19,7 @@ package org.apache.nifi.cdc.postgresql.client;
 import org.postgresql.PGConnection;
 import org.postgresql.replication.LogSequenceNumber;
 import org.postgresql.replication.PGReplicationStream;
+import org.postgresql.replication.ReplicationSlotInfo;
 import org.postgresql.replication.fluent.logical.ChainedLogicalStreamBuilder;
 
 import java.sql.Connection;
@@ -115,14 +116,24 @@ public class PgjdbcReplicationClient implements ReplicationClient {
     }
 
     @Override
-    public LogSequenceNumber createReplicationSlot(final String slotName) throws SQLException {
-        return getPgConnection().getReplicationAPI()
+    public SlotCreation createReplicationSlot(final String slotName) throws SQLException {
+        final ReplicationSlotInfo slotInfo = getPgConnection().getReplicationAPI()
                 .createReplicationSlot()
                 .logical()
                 .withSlotName(slotName)
                 .withOutputPlugin(OUTPUT_PLUGIN)
-                .make()
-                .getConsistentPoint();
+                .make();
+        return new SlotCreation(slotInfo.getConsistentPoint(), slotInfo.getSnapshotName());
+    }
+
+    @Override
+    public void dropReplicationSlot(final String slotName) throws SQLException {
+        getPgConnection().getReplicationAPI().dropReplicationSlot(slotName);
+    }
+
+    @Override
+    public SnapshotConnection openSnapshot(final String snapshotName) throws SQLException {
+        return PgjdbcSnapshotConnection.open(settings, snapshotName);
     }
 
     @Override

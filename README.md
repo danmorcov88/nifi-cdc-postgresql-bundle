@@ -15,7 +15,8 @@
 # NiFi PostgreSQL CDC Bundle
 
 `CaptureChangePostgreSQL` is an Apache NiFi 2.x processor that captures INSERT, UPDATE, DELETE and TRUNCATE events
-from PostgreSQL through logical replication (`pgoutput`) and writes them as records with a Record Writer.
+from PostgreSQL through logical replication (`pgoutput`) and writes them as records with a Record Writer, optionally
+after an initial snapshot of the existing rows.
 
 The module follows the layout and conventions of `nifi-extension-bundles/nifi-cdc` in Apache NiFi and is intended
 as a contribution for [NIFI-4239](https://issues.apache.org/jira/browse/NIFI-4239).
@@ -118,8 +119,8 @@ docker compose --profile nifi up -d          # https://localhost:8443/nifi  (adm
 
 ## Status
 
-Working and covered by unit and integration tests. Not yet supported: initial snapshot of existing rows, pgoutput
-protocol version 2 (streaming of large transactions in progress), binary transfer mode.
+Working and covered by unit and integration tests. Not yet supported: pgoutput protocol version 2 (streaming of
+large transactions in progress), binary transfer mode.
 
 ## License
 

@@ -31,6 +31,7 @@ import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.postgresql.replication.LogSequenceNumber;
@@ -46,6 +47,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -184,8 +186,11 @@ abstract class AbstractCaptureChangePostgreSQLIT {
                 "INSERT INTO lab.type_samples (id) VALUES (2)",
                 "INSERT INTO lab.type_samples (id, c_numeric_free, c_float8, c_date) VALUES (3, 'NaN', 'Infinity', 'infinity')");
 
-        final List<JsonNode> events = collect(runner, 3);
+        assertTypeSamples(collect(runner, 3), "insert");
+    }
 
+    private void assertTypeSamples(final List<JsonNode> events, final String operation) {
+        assertEquals(operation, events.get(0).get("operation").asText());
         final JsonNode row = events.get(0).get("after");
         assertEquals(-32768, row.get("c_int2").asInt());
         assertEquals(Long.MAX_VALUE, row.get("c_int8").asLong());
@@ -367,6 +372,134 @@ abstract class AbstractCaptureChangePostgreSQLIT {
         assertEquals("orders", events.get(0).get("table").asText());
         runner.run(1, false, false);
         runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+    }
+
+    @Test
+    void testInitialSnapshotIsConsistentWithFollowingChanges() throws Exception {
+        execute("INSERT INTO lab.customers (id, name) VALUES (100, 'before slot'), (101, 'before slot too')");
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.EVENTS_PER_FLOWFILE, "1");
+        // the first trigger creates the slot, opens the snapshot and writes one row; the cursor stays open across triggers
+        start(runner);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        execute("INSERT INTO lab.customers (id, name) VALUES (700, 'after slot')");
+
+        final List<JsonNode> events = collect(runner, 5);
+
+        final List<Integer> snapshotIds = new ArrayList<>();
+        for (final JsonNode event : events.subList(0, 4)) {
+            assertEquals("snapshot", event.get("operation").asText());
+            assertEquals("customers", event.get("table").asText());
+            assertEquals(0, event.get("xid").asLong());
+            assertTrue(event.get("before").isNull());
+            snapshotIds.add(event.get("after").get("id").asInt());
+        }
+        assertEquals(List.of(1, 2, 100, 101), snapshotIds, "the snapshot sees the rows that existed when the slot was created");
+        final JsonNode insert = events.get(4);
+        assertEquals("insert", insert.get("operation").asText());
+        assertEquals(700, insert.get("after").get("id").asInt());
+        // the first change after the slot was created can start exactly at the consistent point
+        assertTrue(LogSequenceNumber.valueOf(insert.get("lsn").asText()).asLong() >= LogSequenceNumber.valueOf(events.get(0).get("lsn").asText()).asLong());
+
+        final Map<String, String> state = runner.getStateManager().getState(Scope.CLUSTER).toMap();
+        assertNull(state.get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        assertTrue(LogSequenceNumber.valueOf(state.get(CaptureChangePostgreSQL.STATE_LSN)).asLong() > LogSequenceNumber.valueOf(insert.get("lsn").asText()).asLong(),
+                "the state follows the stream after the snapshot");
+        runner.run(1, false, false);
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+    }
+
+    @Test
+    void testInitialSnapshotDataTypes() throws Exception {
+        execute("INSERT INTO lab.type_samples VALUES (1, -32768, 9223372036854775807, 12345.678, 0.1234567890123456789, 1.5, 2.25, TRUE, "
+                        + "'text with ünïcödé', 'varchar', 'ab', DATE '2026-09-17', TIME '13:45:30.123456', TIMESTAMP '2026-09-17 13:45:30.5', "
+                        + "TIMESTAMPTZ '2026-09-17 13:45:30+02', '123e4567-e89b-12d3-a456-426614174000', '{\"a\": 1}', '{\"b\": [true, null]}', "
+                        + "'\\x00ff10', ARRAY[1, 2, 3], 'happy', INTERVAL '1 day 02:03:04', TIME WITH TIME ZONE '10:00:00+05:30')",
+                "INSERT INTO lab.type_samples (id) VALUES (2)",
+                "INSERT INTO lab.type_samples (id, c_numeric_free, c_float8, c_date) VALUES (3, 'NaN', 'Infinity', 'infinity')");
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.TABLE_NAME_PATTERN, "type_samples");
+        start(runner);
+
+        final List<JsonNode> events = collect(runner, 3);
+
+        events.sort(Comparator.comparingInt(event -> event.get("after").get("id").asInt()));
+        assertTypeSamples(events, "snapshot");
+    }
+
+    @Test
+    void testStopDuringInitialSnapshotStartsOverWithNewSlot() throws Exception {
+        execute("INSERT INTO lab.customers (id, name) VALUES (100, 'a'), (101, 'b'), (102, 'c')");
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.EVENTS_PER_FLOWFILE, "2");
+        start(runner);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        runner.stop();
+        final Map<String, String> state = runner.getStateManager().getState(Scope.CLUSTER).toMap();
+        assertEquals("true", state.get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        final String firstRestartLsn = querySlotRestartLsn();
+
+        final TestRunner secondRunner = createRunner(slotName, UnchangedToastStrategy.NULL);
+        secondRunner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        secondRunner.setProperty(CaptureChangePostgreSQL.EVENTS_PER_FLOWFILE, "2");
+        secondRunner.getStateManager().setState(state, Scope.CLUSTER);
+        start(secondRunner);
+        runner = secondRunner;
+        assertTrue(secondRunner.getLogger().getWarnMessages().stream().anyMatch(message -> message.getMsg().contains("starts over")));
+        assertFalse(firstRestartLsn.equals(querySlotRestartLsn()), "the slot was recreated");
+
+        final List<JsonNode> snapshot = collect(secondRunner, 5);
+        final List<Integer> ids = new ArrayList<>();
+        for (final JsonNode event : snapshot) {
+            assertEquals("snapshot", event.get("operation").asText());
+            ids.add(event.get("after").get("id").asInt());
+        }
+        assertEquals(List.of(1, 2, 100, 101, 102), ids, "the whole snapshot is written again");
+
+        execute("INSERT INTO lab.customers (id, name) VALUES (103, 'streamed')");
+        assertEquals("insert", collect(secondRunner, 1).get(0).get("operation").asText());
+        assertNull(secondRunner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+    }
+
+    @Test
+    void testInitialSnapshotHonoursColumnListAndRowFilter() throws Exception {
+        Assumptions.assumeTrue(serverMajorVersion() >= 15, "column lists and row filters require PostgreSQL 15");
+        execute("INSERT INTO lab.customers (id, name, email) VALUES (100, 'filtered out', 'x@example.com'), (101, 'kept', 'y@example.com')",
+                "DROP PUBLICATION IF EXISTS it_filtered_pub",
+                "CREATE PUBLICATION it_filtered_pub FOR TABLE lab.customers (id, name) WHERE (id > 100)");
+        try {
+            runner.setProperty(CaptureChangePostgreSQL.PUBLICATION_NAME, "it_filtered_pub");
+            runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+            start(runner);
+            execute("INSERT INTO lab.customers (id, name, email) VALUES (102, 'streamed', 'z@example.com')");
+
+            final List<JsonNode> events = collect(runner, 2);
+
+            assertEquals("snapshot", events.get(0).get("operation").asText());
+            assertEquals(101, events.get(0).get("after").get("id").asInt());
+            assertNull(events.get(0).get("after").get("email"), "columns outside the column list are not published");
+            assertEquals("insert", events.get(1).get("operation").asText());
+            assertEquals(102, events.get(1).get("after").get("id").asInt());
+            assertNull(events.get(1).get("after").get("email"));
+        } finally {
+            runner.stop();
+            execute("DROP PUBLICATION IF EXISTS it_filtered_pub");
+        }
+    }
+
+    private String querySlotRestartLsn() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(container.getJdbcUrl(), "postgres", "postgres");
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT restart_lsn FROM pg_replication_slots WHERE slot_name = '" + slotName + "'")) {
+            assertTrue(resultSet.next(), "slot exists");
+            return resultSet.getString(1);
+        }
+    }
+
+    private static int serverMajorVersion() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(container.getJdbcUrl(), "postgres", "postgres")) {
+            return connection.getMetaData().getDatabaseMajorVersion();
+        }
     }
 
     private TestRunner createRunner(final String slot, final UnchangedToastStrategy toastStrategy) throws InitializationException {

@@ -32,6 +32,8 @@ import org.apache.nifi.cdc.postgresql.client.ReplicationClient;
 import org.apache.nifi.cdc.postgresql.client.ReplicationSlot;
 import org.apache.nifi.cdc.postgresql.client.SSLContextRegistry;
 import org.apache.nifi.cdc.postgresql.client.SSLMode;
+import org.apache.nifi.cdc.postgresql.client.SlotCreation;
+import org.apache.nifi.cdc.postgresql.client.SnapshotConnection;
 import org.apache.nifi.cdc.postgresql.event.ChangeEventRecordFactory;
 import org.apache.nifi.cdc.postgresql.event.ChangeOperation;
 import org.apache.nifi.cdc.postgresql.event.TransactionInfo;
@@ -87,10 +89,12 @@ import java.util.regex.Pattern;
 @CapabilityDescription("Retrieves Change Data Capture (CDC) events from a PostgreSQL database using logical replication with the built-in "
         + "pgoutput plugin. The processor reads INSERT, UPDATE, DELETE and TRUNCATE events for the tables of a publication and writes "
         + "them as records using the configured Record Writer, one FlowFile per table and batch. Each record has the fields operation, "
-        + "schema, table, lsn, xid, commit_timestamp, before and after. The position confirmed to the PostgreSQL server never runs ahead "
-        + "of the FlowFiles committed by the processor, so every change is delivered at least once.")
+        + "schema, table, lsn, xid, commit_timestamp, before and after. Optionally, the rows that exist when the replication slot is "
+        + "created are written first as snapshot events. The position confirmed to the PostgreSQL server never runs ahead of the "
+        + "FlowFiles committed by the processor, so every change is delivered at least once.")
 @Stateful(scopes = Scope.CLUSTER, description = "The Log Sequence Number (LSN) up to which changes have been written to FlowFiles is stored "
-        + "so that the processor resumes from the same position after a restart or a change of the primary node.")
+        + "so that the processor resumes from the same position after a restart or a change of the primary node. While an initial "
+        + "snapshot is in progress, a flag records that the snapshot of the slot has not been completed.")
 @WritesAttributes({
         @WritesAttribute(attribute = CaptureChangePostgreSQL.ATTRIBUTE_SCHEMA, description = "Schema of the table the events belong to"),
         @WritesAttribute(attribute = CaptureChangePostgreSQL.ATTRIBUTE_TABLE, description = "Name of the table the events belong to"),
@@ -110,6 +114,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     public static final String ATTRIBUTE_RECORD_COUNT = "record.count";
 
     static final String STATE_LSN = "lsn";
+    static final String STATE_SNAPSHOT_PENDING = "snapshot.pending";
 
     static final int MINIMUM_SERVER_VERSION = 140000;
     static final String REQUIRED_WAL_LEVEL = "logical";
@@ -197,7 +202,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             .name("Replication Slot Name")
             .description("Name of the logical replication slot that tracks the position of this processor on the server. The name may contain "
                     + "lower case letters, digits and underscores. The slot must use the pgoutput plugin and must not be used by another consumer. "
-                    + "The processor never drops the slot; an unused slot retains write-ahead log on the server and must be dropped by an administrator.")
+                    + "The processor does not drop the slot, except to start an interrupted initial snapshot over; an unused slot retains "
+                    + "write-ahead log on the server and must be dropped by an administrator.")
             .required(true)
             .addValidator(StandardValidators.createRegexMatchingValidator(Pattern.compile("[a-z0-9_]{1,63}")))
             .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
@@ -210,6 +216,27 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             .required(true)
             .allowableValues("true", "false")
             .defaultValue("true")
+            .build();
+
+    public static final PropertyDescriptor INITIAL_SNAPSHOT = new PropertyDescriptor.Builder()
+            .name("Initial Snapshot")
+            .description("Whether the rows that exist when the processor creates the replication slot are written before the changes. "
+                    + "Snapshot rows are read in a transaction that sees the database exactly at the position of the new slot, so "
+                    + "the snapshot and the following changes are consistent. A snapshot that is interrupted cannot be resumed: the "
+                    + "processor then drops the slot it created and starts over at the next start.")
+            .required(true)
+            .allowableValues(InitialSnapshotMode.class)
+            .defaultValue(InitialSnapshotMode.NONE)
+            .build();
+
+    public static final PropertyDescriptor SNAPSHOT_FETCH_SIZE = new PropertyDescriptor.Builder()
+            .name("Snapshot Fetch Size")
+            .description("Number of rows fetched from the server at a time while reading the initial snapshot")
+            .required(true)
+            .defaultValue("10000")
+            .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .dependsOn(INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION)
             .build();
 
     public static final PropertyDescriptor SCHEMA_NAME_PATTERN = new PropertyDescriptor.Builder()
@@ -248,7 +275,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     public static final PropertyDescriptor EVENTS_PER_FLOWFILE = new PropertyDescriptor.Builder()
             .name("Events Per FlowFile")
             .description("Number of change events after which a batch is completed at the next transaction boundary. A transaction is never "
-                    + "split, so a FlowFile can contain more events than this number.")
+                    + "split, so a FlowFile can contain more events than this number. Rows of the initial snapshot are written in FlowFiles "
+                    + "of this many rows per table.")
             .required(true)
             .defaultValue("1000")
             .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
@@ -314,6 +342,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             PUBLICATION_NAME,
             REPLICATION_SLOT_NAME,
             CREATE_REPLICATION_SLOT,
+            INITIAL_SNAPSHOT,
+            SNAPSHOT_FETCH_SIZE,
             SCHEMA_NAME_PATTERN,
             TABLE_NAME_PATTERN,
             RECORD_WRITER,
@@ -352,6 +382,13 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
 
     private volatile ReplicationClient client;
     private volatile PGReplicationStream stream;
+    /** Snapshot in progress, or null when no snapshot is open. */
+    private volatile InitialSnapshot snapshot;
+    /** Whether the snapshot of the slot has not been completed yet; while true, triggers read the snapshot instead of the stream. */
+    private volatile boolean snapshotPending;
+    private InitialSnapshotMode initialSnapshotMode;
+    private int snapshotFetchSize;
+    private int snapshotRowsPerBatch;
     private ConnectionSettings connectionSettings;
     private Long walRetentionWarningThreshold;
     private long lastWalRetentionCheckMillis;
@@ -408,6 +445,11 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
                 ? context.getProperty(EVENTS_PER_FLOWFILE).evaluateAttributeExpressions().asInteger() : 1;
         maxBatchWaitMillis = batchStrategy == BatchStrategy.MAX_EVENTS
                 ? context.getProperty(MAX_BATCH_WAIT_TIME).evaluateAttributeExpressions().asTimePeriod(TimeUnit.MILLISECONDS) : 0;
+        initialSnapshotMode = context.getProperty(INITIAL_SNAPSHOT).asAllowableValue(InitialSnapshotMode.class);
+        snapshotFetchSize = initialSnapshotMode == InitialSnapshotMode.ON_SLOT_CREATION
+                ? context.getProperty(SNAPSHOT_FETCH_SIZE).evaluateAttributeExpressions().asInteger() : 0;
+        // with one transaction per FlowFile, a table of the snapshot is one FlowFile
+        snapshotRowsPerBatch = batchStrategy == BatchStrategy.MAX_EVENTS ? eventsPerFlowFile : Integer.MAX_VALUE;
         final UnchangedToastStrategy toastStrategy = context.getProperty(UNCHANGED_TOAST_STRATEGY).asAllowableValue(UnchangedToastStrategy.class);
         final String toastPlaceholder = toastStrategy == UnchangedToastStrategy.PLACEHOLDER
                 ? context.getProperty(UNCHANGED_TOAST_PLACEHOLDER).getValue() : null;
@@ -429,10 +471,12 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             final boolean slotCreated = prepareReplicationSlot(newClient, context, settings);
             loadState(context, slotCreated);
         } catch (final ProcessException e) {
+            closeSnapshot();
             closeQuietly(newClient);
             unregisterSslContext();
             throw e;
         } catch (final Exception e) {
+            closeSnapshot();
             closeQuietly(newClient);
             unregisterSslContext();
             throw new ProcessException(String.format("Preparing logical replication from %s failed: %s", transitUri, e.getMessage()), e);
@@ -442,6 +486,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
 
     @OnStopped
     public void stop() {
+        closeSnapshot();
         closeStream();
         closeClient();
         unregisterSslContext();
@@ -449,6 +494,11 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
+        if (snapshotPending) {
+            readSnapshot(context, session);
+            return;
+        }
+
         final PGReplicationStream currentStream;
         try {
             currentStream = getOrOpenStream();
@@ -547,15 +597,16 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
      * @return whether the slot was created by this call
      */
     private boolean prepareReplicationSlot(final ReplicationClient replicationClient, final ProcessContext context, final ConnectionSettings settings)
-            throws SQLException {
+            throws SQLException, IOException {
+        snapshotPending = false;
+        final boolean pendingSnapshot = Boolean.parseBoolean(context.getStateManager().getState(Scope.CLUSTER).get(STATE_SNAPSHOT_PENDING));
         final Optional<ReplicationSlot> existingSlot = replicationClient.findReplicationSlot(slotName);
         if (existingSlot.isEmpty()) {
             if (!context.getProperty(CREATE_REPLICATION_SLOT).asBoolean()) {
                 throw new ProcessException(String.format("Replication slot [%s] does not exist and %s is false", slotName,
                         CREATE_REPLICATION_SLOT.getDisplayName()));
             }
-            final LogSequenceNumber consistentPoint = replicationClient.createReplicationSlot(slotName);
-            getLogger().info("Created replication slot [{}] with plugin [{}] at position {}", slotName, PgjdbcReplicationClient.OUTPUT_PLUGIN, consistentPoint);
+            createReplicationSlot(replicationClient, context);
             return true;
         }
 
@@ -571,8 +622,143 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         if (slot.active()) {
             throw new ProcessException(String.format("Replication slot [%s] is in use by another connection", slotName));
         }
+        if (pendingSnapshot) {
+            if (initialSnapshotMode == InitialSnapshotMode.ON_SLOT_CREATION) {
+                getLogger().warn("The initial snapshot of replication slot [{}] was interrupted and cannot be resumed; the slot created by "
+                        + "this processor is dropped and the snapshot starts over", slotName);
+                replicationClient.dropReplicationSlot(slotName);
+                createReplicationSlot(replicationClient, context);
+                return true;
+            }
+            getLogger().warn("The initial snapshot of replication slot [{}] was interrupted and is abandoned because {} is {}; streaming "
+                    + "starts from the position of the slot", slotName, INITIAL_SNAPSHOT.getDisplayName(), initialSnapshotMode.getDisplayName());
+            context.getStateManager().clear(Scope.CLUSTER);
+        }
         getLogger().info("Using replication slot [{}] with confirmed position {}", slotName, slot.confirmedFlushLsn());
         return false;
+    }
+
+    /**
+     * Create the slot and, when configured, open the snapshot exported with it. The pending flag is stored before the
+     * slot exists, so that a slot found together with the flag is known to have an unfinished snapshot.
+     */
+    private void createReplicationSlot(final ReplicationClient replicationClient, final ProcessContext context) throws SQLException, IOException {
+        final boolean takeSnapshot = initialSnapshotMode == InitialSnapshotMode.ON_SLOT_CREATION;
+        if (takeSnapshot) {
+            context.getStateManager().setState(Map.of(STATE_SNAPSHOT_PENDING, Boolean.TRUE.toString()), Scope.CLUSTER);
+        }
+        final SlotCreation created = replicationClient.createReplicationSlot(slotName);
+        getLogger().info("Created replication slot [{}] with plugin [{}] at position {}", slotName, PgjdbcReplicationClient.OUTPUT_PLUGIN,
+                created.consistentPoint());
+        if (!takeSnapshot) {
+            return;
+        }
+
+        // the exported snapshot is only valid until the replication connection runs another command
+        final SnapshotConnection snapshotConnection = replicationClient.openSnapshot(created.snapshotName());
+        final List<RelationMessage> tables;
+        try {
+            tables = snapshotConnection.listTables(publicationName).stream().filter(this::isCaptured).toList();
+        } catch (final Exception e) {
+            try {
+                snapshotConnection.close();
+            } catch (final Exception suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
+        snapshot = new InitialSnapshot(snapshotConnection, created.consistentPoint(), tables, recordFactory, snapshotFetchSize, snapshotRowsPerBatch);
+        snapshotPending = true;
+        getLogger().info("Reading the initial snapshot of {} tables of publication [{}] at position {}", tables.size(), publicationName,
+                created.consistentPoint());
+    }
+
+    /**
+     * Write the next batch of snapshot rows. A snapshot that fails cannot be resumed, so the failure path discards
+     * it; the next trigger drops the slot and starts over with a new slot and snapshot.
+     */
+    private void readSnapshot(final ProcessContext context, final ProcessSession session) {
+        try {
+            if (snapshot == null) {
+                restartSnapshot(context);
+            }
+        } catch (final Exception e) {
+            closeSnapshot();
+            closeClient();
+            logFailure(String.format("Restarting the initial snapshot from %s failed", transitUri), e);
+            context.yield();
+            return;
+        }
+
+        final InitialSnapshot currentSnapshot = snapshot;
+        final EventBatch batch = new EventBatch(session, writerFactory, recordFactory, getLogger(), transitUri);
+        boolean completed = false;
+        try {
+            final boolean finished = currentSnapshot.readBatch(batch);
+            if (!batch.isEmpty()) {
+                batch.transfer(REL_SUCCESS);
+            }
+            if (finished) {
+                final long consistentPoint = currentSnapshot.getConsistentPoint().asLong();
+                session.setState(Map.of(STATE_LSN, currentSnapshot.getConsistentPoint().asString()), Scope.CLUSTER);
+                stateLsn = consistentPoint;
+                session.commitAsync(() -> {
+                    confirmedLsn.accumulateAndGet(consistentPoint, Math::max);
+                    snapshotPending = false;
+                }, this::onSnapshotCommitFailure);
+                getLogger().info("Completed the initial snapshot from {}: {} rows of {} tables; streaming changes from position {}", transitUri,
+                        currentSnapshot.getRowCount(), currentSnapshot.getTableCount(), currentSnapshot.getConsistentPoint());
+                closeSnapshot();
+            } else {
+                session.commitAsync(() -> { }, this::onSnapshotCommitFailure);
+            }
+            completed = true;
+            failing = false;
+        } catch (final Exception e) {
+            logFailure(String.format("Reading the initial snapshot from %s failed; the snapshot starts over", transitUri), e);
+            context.yield();
+        } finally {
+            if (!completed) {
+                batch.rollback();
+                closeSnapshot();
+                closeClient();
+            }
+        }
+    }
+
+    /**
+     * Replace the slot whose snapshot was lost by a new slot with a fresh snapshot.
+     */
+    private void restartSnapshot(final ProcessContext context) throws SQLException, IOException {
+        if (client == null) {
+            final ReplicationClient newClient = createReplicationClient(connectionSettings);
+            newClient.connect();
+            client = newClient;
+        }
+        if (client.findReplicationSlot(slotName).isPresent()) {
+            getLogger().warn("Dropping replication slot [{}] to start the interrupted initial snapshot over", slotName);
+            client.dropReplicationSlot(slotName);
+        }
+        createReplicationSlot(client, context);
+    }
+
+    private void onSnapshotCommitFailure(final Throwable failure) {
+        getLogger().error("Committing snapshot rows from {} failed; the snapshot starts over", transitUri, failure);
+        closeSnapshot();
+        closeClient();
+    }
+
+    private void closeSnapshot() {
+        final InitialSnapshot currentSnapshot = snapshot;
+        snapshot = null;
+        if (currentSnapshot == null) {
+            return;
+        }
+        try {
+            currentSnapshot.close();
+        } catch (final Exception e) {
+            getLogger().debug("Closing the snapshot connection failed", e);
+        }
     }
 
     private void loadState(final ProcessContext context, final boolean slotCreated) throws IOException {

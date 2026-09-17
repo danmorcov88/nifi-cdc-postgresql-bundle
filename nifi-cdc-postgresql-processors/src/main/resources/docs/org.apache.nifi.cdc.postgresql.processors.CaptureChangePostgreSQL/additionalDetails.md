@@ -55,11 +55,30 @@ To create it manually:
 SELECT pg_create_logical_replication_slot('nifi_cdc_slot', 'pgoutput');
 ```
 
+## Initial snapshot
+
+By default only changes made after the replication slot was created are captured. With `Initial Snapshot` set to
+`On Slot Creation`, the processor reads the rows of the published tables when it creates the slot and writes them
+first, as events with `operation` `snapshot`, `before` null and the row in `after`. The rows are read in a
+transaction that uses the snapshot the server exports together with the new slot, so they show the database exactly
+at the position from which streaming continues; every later change arrives as a regular event. Snapshot events carry
+the position of the slot as `lsn`, `0` as `xid` and the time the snapshot started as `commit_timestamp`. Each table
+is written in FlowFiles of `Events Per FlowFile` rows (one FlowFile per table with `One Transaction Per FlowFile`).
+
+No snapshot is taken for a slot that already exists. A snapshot that is interrupted, by stopping the processor or by
+a failure, cannot be resumed: at the next start the processor drops the slot it created, the only case in which it
+drops a slot, creates a new one and takes the snapshot again. Rows written before the interruption are delivered
+again.
+
+Column lists and row filters of the publication (PostgreSQL 15 and later) apply to the snapshot as they apply to
+the streamed changes.
+
 ## Retained write-ahead log
 
 A replication slot makes the server keep write-ahead log until the consumer confirms it. While the processor is
-stopped, or when NiFi cannot keep up, this log accumulates and can fill the disk of the server. The processor never
-drops the slot. When the processor is removed from a flow, drop the slot:
+stopped, or when NiFi cannot keep up, this log accumulates and can fill the disk of the server. The processor does
+not drop the slot, except to start an interrupted initial snapshot over. When the processor is removed from a flow,
+drop the slot:
 
 ```sql
 SELECT pg_drop_replication_slot('nifi_cdc_slot');
@@ -77,13 +96,13 @@ that touches several tables end up in several FlowFiles, transferred together; t
 
 | Field              | Type      | Content                                                                  |
 |--------------------|-----------|--------------------------------------------------------------------------|
-| `operation`        | string    | `insert`, `update`, `delete` or `truncate`                               |
+| `operation`        | string    | `insert`, `update`, `delete`, `truncate` or `snapshot`                   |
 | `schema`           | string    | Schema of the table                                                      |
 | `table`            | string    | Name of the table                                                        |
 | `lsn`              | string    | Position of the change in the write-ahead log, for example `0/1783488`   |
 | `xid`              | long      | Transaction id                                                           |
 | `commit_timestamp` | timestamp | Commit time of the transaction                                           |
-| `before`           | record    | Row before the change, see below; null for INSERT and TRUNCATE           |
+| `before`           | record    | Row before the change, see below; null for INSERT, TRUNCATE and snapshot |
 | `after`            | record    | Row after the change; null for DELETE and TRUNCATE                       |
 
 The content of `before` depends on the replica identity of the table:

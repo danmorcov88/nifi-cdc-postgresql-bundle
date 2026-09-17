@@ -23,8 +23,11 @@ import org.apache.nifi.cdc.postgresql.client.ReplicationClient;
 import org.apache.nifi.cdc.postgresql.client.ReplicationSlot;
 import org.apache.nifi.cdc.postgresql.client.SSLMode;
 import org.apache.nifi.cdc.postgresql.event.UnchangedToastStrategy;
+import org.apache.nifi.cdc.postgresql.pgoutput.ColumnValue;
 import org.apache.nifi.cdc.postgresql.pgoutput.CommitMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.PgOutputFixtures;
+import org.apache.nifi.cdc.postgresql.pgoutput.RelationMessage;
+import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.json.JsonRecordSetWriter;
 import org.apache.nifi.processor.exception.ProcessException;
@@ -40,6 +43,7 @@ import org.postgresql.replication.LogSequenceNumber;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -473,6 +477,218 @@ class CaptureChangePostgreSQLTest {
         client.replicationPrivilege = false;
 
         assertSetupFails("REPLICATION");
+    }
+
+    @Test
+    void testInitialSnapshotOnSlotCreation() throws IOException {
+        client.slots.clear();
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.EVENTS_PER_FLOWFILE, "2");
+        client.snapshotTables.put(relation("insert-customers"), List.of(customer(1), customer(2), customer(3)));
+        client.snapshotTables.put(relation("orders-full-identity"), List.of());
+        client.snapshotTables.put(relation("toast-update"), List.of(row("1", "payload", "note")));
+
+        runner.run(1, false, true);
+
+        assertEquals(List.of(FakeReplicationClient.SLOT), client.createdSlots);
+        assertEquals(List.of("00000003-0000001B-1"), client.openedSnapshots);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile first = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        first.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_TABLE, "customers");
+        first.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "2");
+        first.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_LSN, "0/2000");
+        first.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_XID, "0");
+        assertTrue(first.getContent().contains("snapshot,lab,customers,0/2000,0,"), first.getContent());
+        assertTrue(first.getContent().contains("name=Customer 1"), first.getContent());
+        assertTrue(first.getContent().contains("balance=100.00"), first.getContent());
+        assertEquals("true", runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        assertNull(runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+        assertTrue(client.streamStartPositions.isEmpty(), "streaming waits for the snapshot");
+        runner.clearTransferState();
+
+        runner.run(1, false, false);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile second = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        second.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_TABLE, "customers");
+        second.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1");
+        assertTrue(second.getContent().contains("name=Customer 3"));
+        runner.clearTransferState();
+
+        runner.run(1, false, false);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile third = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        third.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_TABLE, "toast_samples");
+        third.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1");
+        assertNull(runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        assertEquals("0/2000", runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+        assertTrue(client.snapshotConnection.closed);
+        assertEquals(0, client.snapshotConnection.openCursors);
+        runner.clearTransferState();
+
+        client.addMessages(PgOutputFixtures.load(SERVER, "insert-customers"));
+        runner.run(1, false, false);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertTrue(runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).getContent().contains("insert,lab,customers,"));
+        assertEquals(List.of(LogSequenceNumber.valueOf("0/2000")), client.streamStartPositions);
+        assertEquals(lastCommitEndLsn("insert-customers"), runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+    }
+
+    @Test
+    void testNoSnapshotForExistingSlot() {
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        client.snapshotTables.put(relation("insert-customers"), List.of(customer(1)));
+        client.addMessages(PgOutputFixtures.load(SERVER, "insert-customers"));
+
+        runner.run();
+
+        assertTrue(client.openedSnapshots.isEmpty());
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertTrue(runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).getContent().contains("insert,lab,customers,"));
+    }
+
+    @Test
+    void testSnapshotHonoursTableFiltersAndOneTransactionPerFlowFile() throws IOException {
+        client.slots.clear();
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.BATCH_STRATEGY, BatchStrategy.ONE_TRANSACTION);
+        runner.setProperty(CaptureChangePostgreSQL.TABLE_NAME_PATTERN, "customers|orders");
+        client.snapshotTables.put(relation("insert-customers"), List.of(customer(1), customer(2), customer(3)));
+        client.snapshotTables.put(relation("toast-update"), List.of(row("1", "payload", "note")));
+        client.snapshotTables.put(relation("orders-full-identity"), List.of(row("0f4b3c2e-9a1d-4c5e-8b7f-1a2b3c4d5e6f", "1", "5.00", "new", null, "2026-09-17")));
+
+        runner.run(2, false, true);
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 2);
+        final List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS);
+        flowFiles.get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_TABLE, "customers");
+        flowFiles.get(0).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "3");
+        flowFiles.get(1).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_TABLE, "orders");
+        flowFiles.get(1).assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "1");
+        assertTrue(flowFiles.get(1).getContent().contains("details=null"));
+        assertNull(runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+    }
+
+    @Test
+    void testStopDuringSnapshotStartsOverWithNewSlot() throws IOException {
+        client.slots.clear();
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.EVENTS_PER_FLOWFILE, "2");
+        client.snapshotTables.put(relation("insert-customers"), List.of(customer(1), customer(2), customer(3)));
+
+        runner.run(1, false, true);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        runner.stop();
+        assertTrue(client.snapshotConnection.closed);
+        assertEquals("true", runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        runner.clearTransferState();
+
+        runner.run(1, false, true);
+
+        assertEquals(List.of(FakeReplicationClient.SLOT), client.droppedSlots);
+        assertEquals(List.of(FakeReplicationClient.SLOT, FakeReplicationClient.SLOT), client.createdSlots);
+        assertEquals(2, client.openedSnapshots.size());
+        assertTrue(runner.getLogger().getWarnMessages().stream().anyMatch(message -> message.getMsg().contains("starts over")));
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile flowFile = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "2");
+        assertTrue(flowFile.getContent().contains("name=Customer 1"), "the snapshot starts from the first row again");
+    }
+
+    @Test
+    void testSnapshotFailureStartsOverWithNewSlot() throws IOException {
+        client.slots.clear();
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.EVENTS_PER_FLOWFILE, "2");
+        client.snapshotTables.put(relation("insert-customers"), List.of(customer(1), customer(2), customer(3)));
+        client.snapshotFailure = new SQLException("connection lost");
+        client.snapshotFailureAfterRows = 2;
+
+        runner.run(1, false, true);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        runner.clearTransferState();
+
+        runner.run(1, false, false);
+        runner.assertTransferCount(CaptureChangePostgreSQL.REL_SUCCESS, 0);
+        assertEquals(1, runner.getLogger().getErrorMessages().size());
+        assertTrue(client.snapshotConnection.closed);
+        assertTrue(client.closed);
+        assertEquals("true", runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+
+        runner.run(1, false, false);
+        assertEquals(2, client.connections);
+        assertEquals(List.of(FakeReplicationClient.SLOT), client.droppedSlots);
+        assertEquals(List.of(FakeReplicationClient.SLOT, FakeReplicationClient.SLOT), client.createdSlots);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertTrue(runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).getContent().contains("name=Customer 1"));
+        runner.clearTransferState();
+
+        runner.run(1, false, false);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertNull(runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        assertEquals("0/2000", runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+    }
+
+    @Test
+    void testPendingSnapshotAtStartDropsSlotAndStartsOver() throws IOException {
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.getStateManager().setState(Map.of(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING, "true"), Scope.CLUSTER);
+        client.snapshotTables.put(relation("insert-customers"), List.of(customer(1)));
+
+        runner.run(1, false, true);
+
+        assertEquals(List.of(FakeReplicationClient.SLOT), client.droppedSlots);
+        assertEquals(List.of(FakeReplicationClient.SLOT), client.createdSlots);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertTrue(runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).getContent().contains("snapshot,lab,customers,"));
+        assertNull(runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+    }
+
+    @Test
+    void testPendingSnapshotIsAbandonedWhenSnapshotDisabled() throws IOException {
+        runner.getStateManager().setState(Map.of(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING, "true"), Scope.CLUSTER);
+        client.addMessages(PgOutputFixtures.load(SERVER, "insert-customers"));
+
+        runner.run();
+
+        assertTrue(client.droppedSlots.isEmpty());
+        assertTrue(client.createdSlots.isEmpty());
+        assertEquals(Collections.singletonList(null), client.streamStartPositions);
+        assertEquals(1, runner.getLogger().getWarnMessages().size());
+        assertTrue(runner.getLogger().getWarnMessages().get(0).getMsg().contains("abandoned"));
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertNull(runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_SNAPSHOT_PENDING));
+        assertEquals(lastCommitEndLsn("insert-customers"), runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
+    }
+
+    @Test
+    void testSnapshotSetupFailureClosesSnapshotConnection() {
+        client.slots.clear();
+        runner.setProperty(CaptureChangePostgreSQL.INITIAL_SNAPSHOT, InitialSnapshotMode.ON_SLOT_CREATION);
+        runner.setProperty(CaptureChangePostgreSQL.CREATE_REPLICATION_SLOT, "false");
+
+        assertSetupFails("does not exist");
+        assertTrue(client.openedSnapshots.isEmpty());
+        assertNull(client.snapshotConnection);
+    }
+
+    private static RelationMessage relation(final String scenario) {
+        return PgOutputFixtures.decode(SERVER, scenario).stream()
+                .filter(RelationMessage.class::isInstance)
+                .map(RelationMessage.class::cast)
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static TupleData customer(final int id) {
+        return row(Integer.toString(id), "Customer " + id, "customer" + id + "@example.com", "100.00", "t", "2026-09-17 10:00:00+00");
+    }
+
+    private static TupleData row(final String... values) {
+        final List<ColumnValue> columns = new ArrayList<>(values.length);
+        for (final String value : values) {
+            columns.add(value == null ? ColumnValue.NULL : ColumnValue.text(value));
+        }
+        return new TupleData(columns);
     }
 
     private void assertSetupFails(final String expectedMessage) {

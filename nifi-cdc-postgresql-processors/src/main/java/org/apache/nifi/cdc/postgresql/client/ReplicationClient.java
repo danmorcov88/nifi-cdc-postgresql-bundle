@@ -53,11 +53,21 @@ public interface ReplicationClient extends AutoCloseable {
     Optional<ReplicationSlot> findReplicationSlot(String slotName) throws SQLException;
 
     /**
-     * Create a logical replication slot using the pgoutput plugin.
-     *
-     * @return the consistent point of the new slot, from which streaming can start
+     * Create a logical replication slot using the pgoutput plugin. The server exports a snapshot of the database at
+     * the consistent point of the slot; it stays valid only until this connection runs another command.
      */
-    LogSequenceNumber createReplicationSlot(String slotName) throws SQLException;
+    SlotCreation createReplicationSlot(String slotName) throws SQLException;
+
+    /**
+     * Drop a replication slot. Only used to start over when the initial snapshot of a slot created by the processor
+     * was interrupted.
+     */
+    void dropReplicationSlot(String slotName) throws SQLException;
+
+    /**
+     * Open a separate connection whose transaction imports the snapshot exported by {@link #createReplicationSlot(String)}.
+     */
+    SnapshotConnection openSnapshot(String snapshotName) throws SQLException;
 
     /**
      * Measure the write-ahead log the slot forces the server to retain. Uses a separate short-lived connection, because the

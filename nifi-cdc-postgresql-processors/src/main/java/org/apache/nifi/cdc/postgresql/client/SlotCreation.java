@@ -14,29 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.cdc.postgresql.event;
+package org.apache.nifi.cdc.postgresql.client;
+
+import org.postgresql.replication.LogSequenceNumber;
 
 /**
- * Kind of change captured for a table row.
+ * Result of creating a logical replication slot.
+ *
+ * @param consistentPoint position from which streaming starts; the exported snapshot shows the database exactly at this point
+ * @param snapshotName name of the snapshot exported by the server, valid until the replication connection runs another
+ *                     command or is closed
  */
-public enum ChangeOperation {
-    INSERT("insert"),
-    UPDATE("update"),
-    DELETE("delete"),
-    TRUNCATE("truncate"),
-    /** A row that existed when the replication slot was created, read by the initial snapshot. */
-    SNAPSHOT("snapshot");
-
-    private final String value;
-
-    ChangeOperation(final String value) {
-        this.value = value;
-    }
-
-    /**
-     * @return value written in the {@code operation} field of a change event record
-     */
-    public String getValue() {
-        return value;
-    }
+public record SlotCreation(LogSequenceNumber consistentPoint, String snapshotName) {
 }
