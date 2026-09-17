@@ -45,6 +45,7 @@
                     <artifactId>apache-rat-plugin</artifactId>
                     <configuration>
                         <excludes combine.children="append">
+                            <exclude>.gitattributes</exclude>
                             <exclude>docs/**</exclude>
                             <exclude>tasks/**</exclude>
                         </excludes>

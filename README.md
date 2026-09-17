@@ -50,6 +50,9 @@ docker compose up -d postgres14 postgres18
 docker compose --profile nifi up -d          # https://localhost:8443/nifi  (admin / adminadminadmin)
 ```
 
+`docker/capture-fixtures.sh` records pgoutput messages from both servers into
+`nifi-cdc-postgresql-processors/src/test/resources/pgoutput/`; the decoder unit tests run against these recordings.
+
 ## License
 
 Apache License 2.0. The NAR bundles the PostgreSQL JDBC driver (BSD-2-Clause); see `META-INF/LICENSE` in the NAR.
