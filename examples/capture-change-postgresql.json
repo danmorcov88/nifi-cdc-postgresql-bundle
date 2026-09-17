@@ -36,6 +36,11 @@
           "Batch Strategy": "MAX_EVENTS",
           "SSL Mode": "DISABLED",
           "Create Replication Slot": "true",
+          "Initial Snapshot": "NONE",
+          "Snapshot Fetch Size": "10000",
+          "Transfer Format": "TEXT",
+          "Large Transaction Streaming": "false",
+          "Max Streamed Transaction Size": "1 GB",
           "Schema Name Pattern": null,
           "Connection Timeout": "30 secs",
           "SSL Context Service": null,
@@ -107,6 +112,41 @@
           "Create Replication Slot": {
             "name": "Create Replication Slot",
             "displayName": "Create Replication Slot",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Initial Snapshot": {
+            "name": "Initial Snapshot",
+            "displayName": "Initial Snapshot",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Snapshot Fetch Size": {
+            "name": "Snapshot Fetch Size",
+            "displayName": "Snapshot Fetch Size",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Transfer Format": {
+            "name": "Transfer Format",
+            "displayName": "Transfer Format",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Large Transaction Streaming": {
+            "name": "Large Transaction Streaming",
+            "displayName": "Large Transaction Streaming",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Max Streamed Transaction Size": {
+            "name": "Max Streamed Transaction Size",
+            "displayName": "Max Streamed Transaction Size",
             "identifiesControllerService": false,
             "sensitive": false,
             "dynamic": false
