@@ -29,6 +29,11 @@ and documentation are still being worked on.
 - Apache NiFi 2.12.0
 - PostgreSQL 14 or newer, with `wal_level = logical`
 
+## Releases
+
+Tagged versions are published on the [Releases](https://github.com/danmorcov88/nifi-cdc-postgresql-bundle/releases) page with
+the NAR attached. The NAR is named after the NiFi version it is built against (`nifi-cdc-postgresql-nar-2.12.0.nar`).
+
 ## Build
 
 ```
