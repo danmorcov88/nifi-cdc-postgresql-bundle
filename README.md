@@ -50,17 +50,21 @@ processor is stopped.
 
 ## How it looks
 
-The processor connected to a `PutFile`, with the FlowFiles of one batch queued between them:
+The processor connected to a `PutFile`, with the FlowFiles it produced queued between them:
 
 ![Flow](examples/screenshots/flow.png)
 
-Connection and output settings:
+Connection properties, capture options (initial snapshot, transfer format, streaming of large transactions) and
+output properties:
 
 ![Connection properties](examples/screenshots/properties-connection.png)
 
+![Capture properties](examples/screenshots/properties-capture.png)
+
 ![Output properties](examples/screenshots/properties-output.png)
 
-One FlowFile per table and batch, with the `cdc.*` attributes:
+One FlowFile per table and batch, with the `cdc.*` attributes; here the snapshot of `lab.customers` taken when the
+slot was created, followed by the changes of `lab.orders`:
 
 ![Queue](examples/screenshots/queue.png)
 
