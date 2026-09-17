@@ -95,12 +95,13 @@ class PostgreSQLTypeMapperTest {
         assertEquals(Integer.MAX_VALUE, mapper.convert(column(PostgreSQLTypeMapper.OID_INT4), "2147483647"));
         assertEquals(Long.MIN_VALUE, mapper.convert(column(PostgreSQLTypeMapper.OID_INT8), "-9223372036854775808"));
         assertEquals(1.5f, mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT4), "1.5"));
-        assertEquals(Float.NEGATIVE_INFINITY, mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT4), "-Infinity"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT4), "-Infinity"));
         assertEquals(1.0e-300, mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT8), "1e-300"));
-        assertTrue(Double.isNaN((Double) mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT8), "NaN")));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT8), "NaN"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_FLOAT8), "Infinity"));
         assertEquals(new BigDecimal("-12345.678"), mapper.convert(column(PostgreSQLTypeMapper.OID_NUMERIC), "-12345.678"));
-        assertEquals("NaN", mapper.convert(column(PostgreSQLTypeMapper.OID_NUMERIC), "NaN"));
-        assertEquals("Infinity", mapper.convert(column(PostgreSQLTypeMapper.OID_NUMERIC), "Infinity"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_NUMERIC), "NaN"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_NUMERIC), "Infinity"));
     }
 
     @Test
@@ -119,22 +120,25 @@ class PostgreSQLTypeMapperTest {
     @Test
     void testConvertTemporal() {
         assertEquals(Date.valueOf(LocalDate.of(1970, 1, 1)), mapper.convert(column(PostgreSQLTypeMapper.OID_DATE), "1970-01-01"));
-        assertEquals("infinity", mapper.convert(column(PostgreSQLTypeMapper.OID_DATE), "infinity"));
-        assertEquals("0044-03-15 BC", mapper.convert(column(PostgreSQLTypeMapper.OID_DATE), "0044-03-15 BC"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_DATE), "infinity"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_DATE), "0044-03-15 BC"));
 
         assertEquals(Time.valueOf(LocalTime.of(0, 0)), mapper.convert(column(PostgreSQLTypeMapper.OID_TIME), "00:00:00"));
         assertEquals(new Time(Time.valueOf(LocalTime.of(23, 59, 59)).getTime() + 999), mapper.convert(column(PostgreSQLTypeMapper.OID_TIME), "23:59:59.999999"));
 
         assertEquals(Timestamp.valueOf(LocalDateTime.of(2026, 9, 17, 13, 45, 30)), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMP), "2026-09-17 13:45:30"));
         assertEquals(Timestamp.valueOf(LocalDateTime.of(2026, 9, 17, 13, 45, 30, 120_000)), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMP), "2026-09-17 13:45:30.00012"));
-        assertEquals("-infinity", mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMP), "-infinity"));
+        assertThrows(UnsupportedValueException.class, () -> mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMP), "-infinity"));
 
         assertEquals(timestamp("2026-09-17T11:45:30Z"), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "2026-09-17 13:45:30+02"));
         assertEquals(timestamp("2026-09-17T08:15:30.5Z"), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "2026-09-17 13:45:30.5+05:30"));
         assertEquals(timestamp("2026-09-17T13:45:30Z"), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "2026-09-17 13:45:30+00"));
         assertEquals(timestamp("2026-09-17T16:45:30Z"), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "2026-09-17 13:45:30-03"));
         assertEquals(timestamp("2026-09-17T13:45:15Z"), mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "2026-09-17 13:45:30+00:00:15"));
-        assertEquals("infinity", mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "infinity"));
+        final UnsupportedValueException exception = assertThrows(UnsupportedValueException.class,
+                () -> mapper.convert(column(PostgreSQLTypeMapper.OID_TIMESTAMPTZ), "infinity"));
+        assertEquals("c", exception.getColumnName());
+        assertEquals("infinity", exception.getText());
     }
 
     @Test

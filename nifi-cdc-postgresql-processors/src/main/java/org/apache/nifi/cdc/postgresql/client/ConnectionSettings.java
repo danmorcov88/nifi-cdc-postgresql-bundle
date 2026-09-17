@@ -48,6 +48,17 @@ public record ConnectionSettings(String hostname, int port, String database, Str
      * @return driver properties for a logical replication connection ({@code replication=database}, simple query protocol)
      */
     public Properties getReplicationProperties() {
+        final Properties properties = getProperties();
+        PGProperty.ASSUME_MIN_SERVER_VERSION.set(properties, MINIMUM_ASSUMED_SERVER_VERSION);
+        PGProperty.REPLICATION.set(properties, "database");
+        PGProperty.PREFER_QUERY_MODE.set(properties, "simple");
+        return properties;
+    }
+
+    /**
+     * @return driver properties for a regular connection, used for catalog queries while the replication connection is streaming
+     */
+    public Properties getProperties() {
         final Properties properties = new Properties();
         PGProperty.USER.set(properties, username);
         if (password != null) {
@@ -56,9 +67,6 @@ public record ConnectionSettings(String hostname, int port, String database, Str
         PGProperty.APPLICATION_NAME.set(properties, applicationName);
         PGProperty.CONNECT_TIMEOUT.set(properties, (int) connectionTimeout.toSeconds());
         PGProperty.LOGIN_TIMEOUT.set(properties, (int) connectionTimeout.toSeconds());
-        PGProperty.ASSUME_MIN_SERVER_VERSION.set(properties, MINIMUM_ASSUMED_SERVER_VERSION);
-        PGProperty.REPLICATION.set(properties, "database");
-        PGProperty.PREFER_QUERY_MODE.set(properties, "simple");
         PGProperty.SSL_MODE.set(properties, sslMode.getParameterValue());
         if (sslContextIdentifier != null) {
             PGProperty.SSL_FACTORY.set(properties, RegisteredSSLSocketFactory.class.getName());

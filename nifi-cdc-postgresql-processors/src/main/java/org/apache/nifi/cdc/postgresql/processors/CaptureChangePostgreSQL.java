@@ -54,6 +54,7 @@ import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.components.state.StateMap;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.DataUnit;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
@@ -286,6 +287,16 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             .dependsOn(UNCHANGED_TOAST_STRATEGY, UnchangedToastStrategy.PLACEHOLDER)
             .build();
 
+    public static final PropertyDescriptor WAL_RETENTION_WARNING_THRESHOLD = new PropertyDescriptor.Builder()
+            .name("WAL Retention Warning Threshold")
+            .description("Amount of write-ahead log retained on the server for the replication slot above which the processor logs a "
+                    + "warning bulletin. A slot retains WAL until its consumer confirms it, so a stopped or lagging processor can fill the "
+                    + "disk of the server. The check runs once per minute on a separate connection. Leave empty to disable the check.")
+            .required(false)
+            .addValidator(StandardValidators.DATA_SIZE_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .build();
+
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
             .description("FlowFiles containing change events, one FlowFile per table and batch")
@@ -310,7 +321,8 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
             EVENTS_PER_FLOWFILE,
             MAX_BATCH_WAIT_TIME,
             UNCHANGED_TOAST_STRATEGY,
-            UNCHANGED_TOAST_PLACEHOLDER
+            UNCHANGED_TOAST_PLACEHOLDER,
+            WAL_RETENTION_WARNING_THRESHOLD
     );
 
     private static final Set<Relationship> RELATIONSHIPS = Set.of(REL_SUCCESS);
@@ -322,6 +334,11 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     /** Minimum time between state updates that only record progress without writing FlowFiles. */
     private static final long IDLE_STATE_UPDATE_INTERVAL_MILLIS = STATUS_INTERVAL.toMillis();
     private static final long INVALID_LSN = LogSequenceNumber.INVALID_LSN.asLong();
+    private static final long BYTES_PER_MEGABYTE = 1024 * 1024;
+    /** How often the retained write-ahead log is measured. */
+    private static final long WAL_RETENTION_CHECK_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(1);
+    /** Minimum time between repeated warnings while the same kind of failure persists. */
+    private static final long REPEATED_FAILURE_LOG_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(1);
 
     private final PgOutputDecoder decoder = new PgOutputDecoder();
     private final RelationCache relationCache = new RelationCache();
@@ -335,6 +352,11 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
 
     private volatile ReplicationClient client;
     private volatile PGReplicationStream stream;
+    private ConnectionSettings connectionSettings;
+    private Long walRetentionWarningThreshold;
+    private long lastWalRetentionCheckMillis;
+    private long lastFailureLogMillis;
+    private boolean failing;
     private ChangeEventRecordFactory recordFactory;
     private RecordSetWriterFactory writerFactory;
     private String publicationName;
@@ -389,9 +411,15 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         final UnchangedToastStrategy toastStrategy = context.getProperty(UNCHANGED_TOAST_STRATEGY).asAllowableValue(UnchangedToastStrategy.class);
         final String toastPlaceholder = toastStrategy == UnchangedToastStrategy.PLACEHOLDER
                 ? context.getProperty(UNCHANGED_TOAST_PLACEHOLDER).getValue() : null;
-        recordFactory = new ChangeEventRecordFactory(toastStrategy, toastPlaceholder);
+        recordFactory = new ChangeEventRecordFactory(toastStrategy, toastPlaceholder, message -> getLogger().warn(message));
+
+        walRetentionWarningThreshold = context.getProperty(WAL_RETENTION_WARNING_THRESHOLD).isSet()
+                ? context.getProperty(WAL_RETENTION_WARNING_THRESHOLD).evaluateAttributeExpressions().asDataSize(DataUnit.B).longValue() : null;
+        lastWalRetentionCheckMillis = 0;
+        failing = false;
 
         final ConnectionSettings settings = createConnectionSettings(context);
+        connectionSettings = settings;
         transitUri = String.format("postgresql://%s:%d/%s", settings.hostname(), settings.port(), settings.database());
 
         final ReplicationClient newClient = createReplicationClient(settings);
@@ -415,8 +443,7 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     @OnStopped
     public void stop() {
         closeStream();
-        closeQuietly(client);
-        client = null;
+        closeClient();
         unregisterSslContext();
     }
 
@@ -425,11 +452,14 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         final PGReplicationStream currentStream;
         try {
             currentStream = getOrOpenStream();
-        } catch (final SQLException e) {
-            getLogger().error("Starting replication stream from {} failed", transitUri, e);
+        } catch (final Exception e) {
+            closeStream();
+            closeClient();
+            logFailure(String.format("Connecting to %s for logical replication failed", transitUri), e);
             context.yield();
             return;
         }
+        checkWalRetention();
 
         // Messages taken from the stream are either committed to FlowFiles or the stream is discarded and reopened
         // from the confirmed position, so that the confirmed position never runs ahead of the FlowFiles.
@@ -454,13 +484,15 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
                 session.commitAsync(() -> confirmedLsn.accumulateAndGet(batchEndLsn, Math::max), this::onCommitFailure);
             }
             completed = true;
+            failing = false;
         } catch (final Exception e) {
-            getLogger().error("Processing changes from {} failed; the replication stream will be reopened from the last confirmed position", transitUri, e);
+            logFailure(String.format("Processing changes from %s failed; the connection will be reopened from the last confirmed position", transitUri), e);
             context.yield();
         } finally {
             if (!completed) {
                 batch.rollback();
                 closeStream();
+                closeClient();
             }
         }
     }
@@ -561,7 +593,15 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         streamFlushedLsn = INVALID_LSN;
     }
 
+    /**
+     * Returns the open stream, reconnecting and reopening it from the confirmed position when necessary.
+     */
     private PGReplicationStream getOrOpenStream() throws SQLException {
+        if (client == null) {
+            final ReplicationClient newClient = createReplicationClient(connectionSettings);
+            newClient.connect();
+            client = newClient;
+        }
         if (stream == null) {
             final long startLsn = confirmedLsn.get();
             final LogSequenceNumber startPosition = startLsn == INVALID_LSN ? null : LogSequenceNumber.valueOf(startLsn);
@@ -609,9 +649,46 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
     }
 
     private void onCommitFailure(final Throwable failure) {
-        getLogger().error("Committing change events from {} failed; the replication stream will be reopened from the last confirmed position",
+        getLogger().error("Committing change events from {} failed; the connection will be reopened from the last confirmed position",
                 transitUri, failure);
         closeStream();
+        closeClient();
+    }
+
+    /**
+     * Logs a failure as an error the first time, then as a warning at a limited rate while triggers keep failing, so that a
+     * server outage or a change that cannot be written does not flood the bulletin board. Every trigger retries.
+     */
+    private void logFailure(final String message, final Exception failure) {
+        final long now = System.currentTimeMillis();
+        if (!failing) {
+            failing = true;
+            lastFailureLogMillis = now;
+            getLogger().error("{}; retrying", message, failure);
+        } else if (now - lastFailureLogMillis >= REPEATED_FAILURE_LOG_INTERVAL_MILLIS) {
+            lastFailureLogMillis = now;
+            getLogger().warn("{}; still retrying: {}", message, failure.toString());
+        } else {
+            getLogger().debug("{}", message, failure);
+        }
+    }
+
+    private void checkWalRetention() {
+        final long now = System.currentTimeMillis();
+        if (walRetentionWarningThreshold == null || now - lastWalRetentionCheckMillis < WAL_RETENTION_CHECK_INTERVAL_MILLIS) {
+            return;
+        }
+        lastWalRetentionCheckMillis = now;
+        try {
+            final long retainedBytes = client.getRetainedWalBytes(slotName);
+            if (retainedBytes > walRetentionWarningThreshold) {
+                getLogger().warn("Replication slot [{}] on {} retains {} MB of write-ahead log, above the threshold of {} MB; "
+                                + "the server cannot recycle this log until the processor confirms the changes",
+                        slotName, transitUri, retainedBytes / BYTES_PER_MEGABYTE, walRetentionWarningThreshold / BYTES_PER_MEGABYTE);
+            }
+        } catch (final Exception e) {
+            getLogger().debug("Measuring the write-ahead log retained by replication slot [{}] failed", slotName, e);
+        }
     }
 
     private void closeStream() {
@@ -632,6 +709,11 @@ public class CaptureChangePostgreSQL extends AbstractProcessor {
         } catch (final Exception e) {
             getLogger().debug("Closing replication stream failed", e);
         }
+    }
+
+    private void closeClient() {
+        closeQuietly(client);
+        client = null;
     }
 
     private void closeQuietly(final ReplicationClient replicationClient) {

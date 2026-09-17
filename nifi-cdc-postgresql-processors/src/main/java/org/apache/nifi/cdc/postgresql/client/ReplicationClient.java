@@ -60,6 +60,14 @@ public interface ReplicationClient extends AutoCloseable {
     LogSequenceNumber createReplicationSlot(String slotName) throws SQLException;
 
     /**
+     * Measure the write-ahead log the slot forces the server to retain. Uses a separate short-lived connection, because the
+     * replication connection cannot run queries while it streams.
+     *
+     * @return bytes between the current write position of the server and the restart position of the slot
+     */
+    long getRetainedWalBytes(String slotName) throws SQLException;
+
+    /**
      * Start streaming changes.
      *
      * @param slotName replication slot to consume

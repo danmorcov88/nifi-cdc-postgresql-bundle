@@ -100,6 +100,21 @@ public class PgjdbcReplicationClient implements ReplicationClient {
     }
 
     @Override
+    public long getRetainedWalBytes(final String slotName) throws SQLException {
+        try (Connection plainConnection = DriverManager.getConnection(settings.getJdbcUrl(), settings.getProperties());
+             PreparedStatement statement = plainConnection.prepareStatement(
+                     "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) FROM pg_catalog.pg_replication_slots WHERE slot_name = ?")) {
+            statement.setString(1, slotName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new SQLException(String.format("Replication slot [%s] not found", slotName));
+                }
+                return resultSet.getLong(1);
+            }
+        }
+    }
+
+    @Override
     public LogSequenceNumber createReplicationSlot(final String slotName) throws SQLException {
         return getPgConnection().getReplicationAPI()
                 .createReplicationSlot()

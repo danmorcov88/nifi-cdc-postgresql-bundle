@@ -55,7 +55,11 @@ class FakeReplicationClient implements ReplicationClient {
     /** Thrown by the stream once the pending messages are exhausted, when set. */
     SQLException readFailure;
 
-    boolean connected;
+    long retainedWalBytes;
+    /** Thrown by {@link #connect()} when set. */
+    SQLException connectFailure;
+
+    int connections;
     boolean closed;
     FakeReplicationStream stream;
 
@@ -68,8 +72,17 @@ class FakeReplicationClient implements ReplicationClient {
     }
 
     @Override
-    public void connect() {
-        connected = true;
+    public void connect() throws SQLException {
+        if (connectFailure != null) {
+            throw connectFailure;
+        }
+        connections++;
+        closed = false;
+    }
+
+    @Override
+    public long getRetainedWalBytes(final String slotName) {
+        return retainedWalBytes;
     }
 
     @Override

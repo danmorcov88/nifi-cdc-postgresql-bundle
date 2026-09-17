@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -210,10 +211,10 @@ class PgOutputFixtureTest {
         assertTrue(nulls.newTuple().columns().subList(1, 23).stream().allMatch(ColumnValue::isNull));
 
         final InsertMessage specials = (InsertMessage) messages.get(5);
-        assertEquals("NaN", convert(mapper, relation, specials, "c_numeric_free"));
-        assertEquals(Double.POSITIVE_INFINITY, convert(mapper, relation, specials, "c_float8"));
-        assertEquals("infinity", convert(mapper, relation, specials, "c_date"));
-        assertEquals("-infinity", convert(mapper, relation, specials, "c_timestamp"));
+        assertThrows(UnsupportedValueException.class, () -> convert(mapper, relation, specials, "c_numeric_free"));
+        assertThrows(UnsupportedValueException.class, () -> convert(mapper, relation, specials, "c_float8"));
+        assertThrows(UnsupportedValueException.class, () -> convert(mapper, relation, specials, "c_date"));
+        assertThrows(UnsupportedValueException.class, () -> convert(mapper, relation, specials, "c_timestamp"));
     }
 
     @ParameterizedTest

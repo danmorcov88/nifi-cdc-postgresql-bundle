@@ -37,8 +37,9 @@ the NAR attached. The NAR is named after the NiFi version it is built against (`
 ## Build
 
 ```
-./mvnw verify                      # compile, unit tests, NAR
-./mvnw verify -P contrib-check     # same, plus the upstream RAT, checkstyle and PMD checks
+./mvnw verify                        # compile, unit tests, NAR
+./mvnw verify -P contrib-check       # same, plus the upstream RAT, checkstyle and PMD checks
+./mvnw verify -P integration-tests   # also runs the Testcontainers suite against PostgreSQL 14 and 18 (needs Docker)
 ```
 
 The NAR is produced at `nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2.12.0.nar`.

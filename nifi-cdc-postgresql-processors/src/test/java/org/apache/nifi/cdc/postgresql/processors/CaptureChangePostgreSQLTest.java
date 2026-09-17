@@ -16,6 +16,8 @@
  */
 package org.apache.nifi.cdc.postgresql.processors;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.nifi.cdc.postgresql.client.ConnectionSettings;
 import org.apache.nifi.cdc.postgresql.client.ReplicationClient;
 import org.apache.nifi.cdc.postgresql.client.ReplicationSlot;
@@ -24,6 +26,7 @@ import org.apache.nifi.cdc.postgresql.event.UnchangedToastStrategy;
 import org.apache.nifi.cdc.postgresql.pgoutput.CommitMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.PgOutputFixtures;
 import org.apache.nifi.components.state.Scope;
+import org.apache.nifi.json.JsonRecordSetWriter;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.serialization.record.MockRecordWriter;
@@ -35,6 +38,7 @@ import org.junit.jupiter.api.Test;
 import org.postgresql.replication.LogSequenceNumber;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
@@ -115,6 +119,40 @@ class CaptureChangePostgreSQLTest {
         final String endLsn = lastCommitEndLsn("insert-customers");
         assertEquals(endLsn, runner.getStateManager().getState(Scope.CLUSTER).get(CaptureChangePostgreSQL.STATE_LSN));
         assertEquals(1, runner.getProvenanceEvents().size());
+    }
+
+    @Test
+    void testJsonRecordWriterOutput() throws Exception {
+        final JsonRecordSetWriter jsonWriter = new JsonRecordSetWriter();
+        runner.addControllerService("json", jsonWriter);
+        runner.enableControllerService(jsonWriter);
+        runner.setProperty(CaptureChangePostgreSQL.RECORD_WRITER, "json");
+        client.addMessages(PgOutputFixtures.load(SERVER, "orders-full-identity"));
+
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final MockFlowFile flowFile = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0);
+        flowFile.assertAttributeEquals("mime.type", "application/json");
+        flowFile.assertAttributeEquals(CaptureChangePostgreSQL.ATTRIBUTE_EVENT_COUNT, "3");
+
+        final JsonNode events = new ObjectMapper().readTree(flowFile.toByteArray());
+        assertEquals(3, events.size());
+        final JsonNode insert = events.get(0);
+        assertEquals("insert", insert.get("operation").asText());
+        assertEquals("orders", insert.get("table").asText());
+        assertTrue(insert.get("before").isNull());
+        assertEquals("0f4b3c2e-9a1d-4c5e-8b7f-1a2b3c4d5e6f", insert.get("after").get("id").asText());
+        assertEquals(new BigDecimal("99.99"), insert.get("after").get("amount").decimalValue());
+        assertEquals("{\"items\": [1, 2]}", insert.get("after").get("details").asText());
+        final JsonNode update = events.get(1);
+        assertEquals("new", update.get("before").get("status").asText());
+        assertEquals("paid", update.get("after").get("status").asText());
+        final JsonNode delete = events.get(2);
+        assertEquals("paid", delete.get("before").get("status").asText());
+        assertTrue(delete.get("after").isNull());
+        assertTrue(delete.get("lsn").asText().startsWith("0/"));
+        assertTrue(delete.get("xid").asLong() > 0);
     }
 
     @Test
@@ -253,6 +291,66 @@ class CaptureChangePostgreSQLTest {
 
         runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
         assertEquals(2, client.streamStartPositions.size());
+        assertEquals(2, client.connections);
+    }
+
+    @Test
+    void testConnectionFailuresAreLoggedOnceUntilRestored() {
+        client.readFailure = new SQLException("connection lost");
+        runner.run(1, false);
+        assertEquals(1, runner.getLogger().getErrorMessages().size());
+        assertTrue(client.closed);
+
+        client.connectFailure = new SQLException("server down");
+        runner.run(3, false, false);
+        assertEquals(1, runner.getLogger().getErrorMessages().size(), "one error per failure episode");
+        assertTrue(runner.getLogger().getWarnMessages().isEmpty());
+        assertEquals(1, client.connections);
+
+        client.connectFailure = null;
+        client.addMessages(PgOutputFixtures.load(SERVER, "insert-customers"));
+        runner.run(1, false, false);
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        assertEquals(2, client.connections);
+
+        client.readFailure = new SQLException("connection lost again");
+        runner.run(1, false, false);
+        assertEquals(2, runner.getLogger().getErrorMessages().size(), "a new failure episode is reported again");
+    }
+
+    @Test
+    void testUnsupportedValuesAreWrittenAsNullWithOneWarningPerColumn() {
+        client.addMessages(PgOutputFixtures.load(SERVER, "types-insert"));
+
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(CaptureChangePostgreSQL.REL_SUCCESS, 1);
+        final String content = runner.getFlowFilesForRelationship(CaptureChangePostgreSQL.REL_SUCCESS).get(0).getContent();
+        assertTrue(content.contains("c_numeric_free=null"), content);
+        assertTrue(content.contains("c_float8=null"), content);
+        assertEquals(4, runner.getLogger().getWarnMessages().size());
+        assertTrue(runner.getLogger().getWarnMessages().get(0).getMsg().contains("lab.type_samples.c_numeric_free"));
+    }
+
+    @Test
+    void testWalRetentionWarning() {
+        runner.setProperty(CaptureChangePostgreSQL.WAL_RETENTION_WARNING_THRESHOLD, "1 MB");
+        client.retainedWalBytes = 5L * 1024 * 1024;
+
+        runner.run();
+
+        assertEquals(1, runner.getLogger().getWarnMessages().size());
+        assertTrue(runner.getLogger().getWarnMessages().get(0).getMsg().contains("retains 5 MB"));
+    }
+
+    @Test
+    void testWalRetentionBelowThreshold() {
+        runner.setProperty(CaptureChangePostgreSQL.WAL_RETENTION_WARNING_THRESHOLD, "10 MB");
+        client.retainedWalBytes = 5L * 1024 * 1024;
+
+        runner.run();
+
+        assertTrue(runner.getLogger().getWarnMessages().isEmpty());
     }
 
     @Test

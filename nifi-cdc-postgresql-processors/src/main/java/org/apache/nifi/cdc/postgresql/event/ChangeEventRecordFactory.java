@@ -21,6 +21,7 @@ import org.apache.nifi.cdc.postgresql.pgoutput.PostgreSQLTypeMapper;
 import org.apache.nifi.cdc.postgresql.pgoutput.RelationColumn;
 import org.apache.nifi.cdc.postgresql.pgoutput.RelationMessage;
 import org.apache.nifi.cdc.postgresql.pgoutput.TupleData;
+import org.apache.nifi.cdc.postgresql.pgoutput.UnsupportedValueException;
 import org.apache.nifi.serialization.SimpleRecordSchema;
 import org.apache.nifi.serialization.record.MapRecord;
 import org.apache.nifi.serialization.record.Record;
@@ -31,13 +32,19 @@ import org.apache.nifi.serialization.record.RecordSchema;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Builds change event records. Every event has the same top level fields; the {@code before} and {@code after}
  * images are records whose schema follows the columns of the table as described by the latest Relation message.
+ * <p>
+ * Values that cannot be represented in the mapped record type (for example {@code NaN} in a numeric column) are
+ * written as null, and a warning is issued once per column so that the flow keeps running.
  */
 public class ChangeEventRecordFactory {
 
@@ -53,13 +60,22 @@ public class ChangeEventRecordFactory {
     private final PostgreSQLTypeMapper typeMapper = new PostgreSQLTypeMapper();
     private final UnchangedToastStrategy unchangedToastStrategy;
     private final String unchangedToastPlaceholder;
+    private final Consumer<String> warningHandler;
+    private final Set<String> reportedColumns = new HashSet<>();
 
     /** Schemas keyed by relation description, so that a changed table definition yields a new schema. */
     private final Map<RelationMessage, EventSchemas> schemas = new HashMap<>();
 
-    public ChangeEventRecordFactory(final UnchangedToastStrategy unchangedToastStrategy, final String unchangedToastPlaceholder) {
+    /**
+     * @param unchangedToastStrategy how unchanged TOAST values are represented
+     * @param unchangedToastPlaceholder placeholder for the {@link UnchangedToastStrategy#PLACEHOLDER} strategy
+     * @param warningHandler receives a warning message the first time a column holds a value that cannot be represented
+     */
+    public ChangeEventRecordFactory(final UnchangedToastStrategy unchangedToastStrategy, final String unchangedToastPlaceholder,
+                                    final Consumer<String> warningHandler) {
         this.unchangedToastStrategy = unchangedToastStrategy;
         this.unchangedToastPlaceholder = unchangedToastPlaceholder;
+        this.warningHandler = warningHandler;
     }
 
     /**
@@ -108,11 +124,24 @@ public class ChangeEventRecordFactory {
             final ColumnValue value = columnValues.get(i);
             switch (value.kind()) {
                 case NULL -> values.put(column.name(), null);
-                case TEXT -> values.put(column.name(), typeMapper.convert(column, value.text()));
+                case TEXT -> values.put(column.name(), convert(relation, column, value.text()));
                 case UNCHANGED_TOAST -> putUnchangedToast(values, column);
             }
         }
         return new MapRecord(rowSchema, values);
+    }
+
+    private Object convert(final RelationMessage relation, final RelationColumn column, final String text) {
+        try {
+            return typeMapper.convert(column, text);
+        } catch (final UnsupportedValueException e) {
+            final String qualifiedColumn = String.format("%s.%s.%s", relation.namespace(), relation.name(), column.name());
+            if (reportedColumns.add(qualifiedColumn)) {
+                warningHandler.accept(String.format("Column %s holds the value [%s], which cannot be represented in the mapped record type; "
+                        + "such values are written as null (reported once per column)", qualifiedColumn, e.getText()));
+            }
+            return null;
+        }
     }
 
     private void putUnchangedToast(final Map<String, Object> values, final RelationColumn column) {

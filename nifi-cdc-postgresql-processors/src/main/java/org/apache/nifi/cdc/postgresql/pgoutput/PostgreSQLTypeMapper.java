@@ -42,8 +42,9 @@ import java.util.UUID;
  * <p>
  * Types without a dedicated mapping (arrays, intervals, ranges, geometric types, user-defined types, ...) are
  * mapped to strings and keep their PostgreSQL text representation. Special values that have no Java equivalent
- * in the mapped type ({@code NaN} and {@code Infinity} for numeric, {@code infinity} and BC dates for temporal
- * types) are also kept as strings.
+ * in the mapped type, or that the record writers of NiFi cannot serialize ({@code NaN} and {@code Infinity} for
+ * numeric and floating point columns, {@code infinity} and BC dates for temporal types), are reported through
+ * {@link UnsupportedValueException}.
  */
 public class PostgreSQLTypeMapper {
 
@@ -118,19 +119,20 @@ public class PostgreSQLTypeMapper {
      * @param column column description from the Relation message
      * @param text text representation as sent by pgoutput, not null
      * @return the converted value
+     * @throws UnsupportedValueException when the value cannot be represented in the mapped record type
      */
     public Object convert(final RelationColumn column, final String text) {
         return switch (column.typeId()) {
             case OID_BOOL -> "t".equals(text);
             case OID_INT2, OID_INT4 -> Integer.valueOf(text);
             case OID_INT8 -> Long.valueOf(text);
-            case OID_FLOAT4 -> Float.valueOf(text);
-            case OID_FLOAT8 -> Double.valueOf(text);
-            case OID_NUMERIC -> convertNumeric(text);
-            case OID_DATE -> convertDate(text);
-            case OID_TIME -> convertTime(text);
-            case OID_TIMESTAMP -> convertTimestamp(text);
-            case OID_TIMESTAMPTZ -> convertTimestampWithTimeZone(text);
+            case OID_FLOAT4 -> convertFloat(column, text);
+            case OID_FLOAT8 -> convertDouble(column, text);
+            case OID_NUMERIC -> convertNumeric(column, text);
+            case OID_DATE -> convertDate(column, text);
+            case OID_TIME -> convertTime(column, text);
+            case OID_TIMESTAMP -> convertTimestamp(column, text);
+            case OID_TIMESTAMPTZ -> convertTimestampWithTimeZone(column, text);
             case OID_UUID -> UUID.fromString(text);
             case OID_BYTEA -> convertBytea(text);
             default -> text;
@@ -149,47 +151,66 @@ public class PostgreSQLTypeMapper {
         return RecordFieldType.DECIMAL.getDecimalDataType(precision, Math.max(scale, 0));
     }
 
-    private Object convertNumeric(final String text) {
+    /**
+     * NaN and the infinities are valid float values in Java, but the record writers of NiFi cannot serialize them.
+     */
+    private Object convertFloat(final RelationColumn column, final String text) {
+        final float value = Float.parseFloat(text);
+        if (Float.isNaN(value) || Float.isInfinite(value)) {
+            throw new UnsupportedValueException(column, text);
+        }
+        return value;
+    }
+
+    private Object convertDouble(final RelationColumn column, final String text) {
+        final double value = Double.parseDouble(text);
+        if (Double.isNaN(value) || Double.isInfinite(value)) {
+            throw new UnsupportedValueException(column, text);
+        }
+        return value;
+    }
+
+    private Object convertNumeric(final RelationColumn column, final String text) {
         try {
             return new BigDecimal(text);
         } catch (final NumberFormatException e) {
-            return text;
+            throw new UnsupportedValueException(column, text);
         }
     }
 
-    private Object convertDate(final String text) {
+    private Object convertDate(final RelationColumn column, final String text) {
         try {
             return Date.valueOf(LocalDate.parse(text));
         } catch (final DateTimeParseException e) {
-            return text;
+            throw new UnsupportedValueException(column, text);
         }
     }
 
     /**
      * Fractional seconds are kept up to millisecond precision, the precision of {@link Time}.
      */
-    private Object convertTime(final String text) {
+    private Object convertTime(final RelationColumn column, final String text) {
         try {
             final LocalTime time = LocalTime.parse(text);
             return new Time(Time.valueOf(time).getTime() + time.getNano() / NANOS_PER_MILLI);
         } catch (final DateTimeParseException e) {
-            return text;
+            throw new UnsupportedValueException(column, text);
         }
     }
 
-    private Object convertTimestamp(final String text) {
+    private Object convertTimestamp(final RelationColumn column, final String text) {
         try {
             return Timestamp.valueOf(LocalDateTime.parse(text, TIMESTAMP_FORMATTER));
         } catch (final DateTimeParseException e) {
-            return text;
+            throw new UnsupportedValueException(column, text);
         }
     }
 
-    private Object convertTimestampWithTimeZone(final String text) {
+    private Object convertTimestampWithTimeZone(final RelationColumn column, final String text) {
         try {
             return Timestamp.from(OffsetDateTime.parse(text, TIMESTAMPTZ_FORMATTER).toInstant());
         } catch (final DateTimeParseException e) {
-            return text;
+            throw new UnsupportedValueException(column, text);
         }
     }
 

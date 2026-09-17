@@ -49,3 +49,22 @@ jobs:
           name: nifi-cdc-postgresql-nar
           path: nifi-cdc-postgresql-nar/target/*.nar
           if-no-files-found: error
+
+  integration-tests:
+    name: Integration tests (PostgreSQL 14 and 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+
+      - name: Run integration tests
+        run: ./mvnw -B -ntp verify -P integration-tests -Dsurefire.skip=true
