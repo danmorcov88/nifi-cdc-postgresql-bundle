@@ -73,7 +73,7 @@ services:
       NIFI_WEB_HTTPS_PORT: "8443"
       NIFI_WEB_PROXY_HOST: localhost:8443
     volumes:
-      - ./nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2.12.0.nar:/opt/nifi/nifi-current/extensions/nifi-cdc-postgresql-nar-2.12.0.nar:ro
+      - ./nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2.12.0.nar:/opt/nifi/nifi-current/nar_extensions/nifi-cdc-postgresql-nar-2.12.0.nar:ro
     depends_on:
       postgres14:
         condition: service_healthy

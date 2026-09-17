@@ -36,7 +36,7 @@ The module layout, build and coding conventions follow `nifi-extension-bundles/n
 ```
 
 The NAR is produced at `nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2.12.0.nar`.
-Copy it into the `extensions/` directory of a NiFi 2.12.0 installation.
+Copy it into the `lib/` directory (or the NAR auto-load directory, `nar_extensions/` in the Docker image) of a NiFi 2.12.0 installation.
 
 ## Development lab
 
