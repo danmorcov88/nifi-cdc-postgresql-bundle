@@ -1,0 +1,79 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Development lab: two PostgreSQL servers configured for logical replication
+# (oldest and newest supported major version) and a NiFi instance that loads
+# the NAR built by `./mvnw package`.
+#
+#   docker compose up -d postgres14 postgres18      # databases only
+#   docker compose --profile nifi up -d             # databases + NiFi (build the NAR first)
+#
+# Connection details for both servers: database `cdc_lab`, user `nifi_cdc`,
+# password `nifi_cdc`, publication `nifi_cdc_pub`. See docker/init/01-init.sql.
+
+x-postgres-common: &postgres-common
+  environment:
+    POSTGRES_DB: cdc_lab
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+  command:
+    - postgres
+    - -c
+    - wal_level=logical
+    - -c
+    - max_replication_slots=8
+    - -c
+    - max_wal_senders=8
+    - -c
+    - wal_sender_timeout=60s
+  volumes:
+    - ./docker/init:/docker-entrypoint-initdb.d:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d cdc_lab"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+services:
+  postgres14:
+    <<: *postgres-common
+    image: postgres:14-alpine
+    container_name: cdc-postgres14
+    ports:
+      - "5414:5432"
+
+  postgres18:
+    <<: *postgres-common
+    image: postgres:18-alpine
+    container_name: cdc-postgres18
+    ports:
+      - "5418:5432"
+
+  nifi:
+    image: apache/nifi:2.12.0
+    container_name: cdc-nifi
+    profiles: ["nifi"]
+    ports:
+      - "8443:8443"
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: adminadminadmin
+      NIFI_WEB_HTTPS_PORT: "8443"
+      NIFI_WEB_PROXY_HOST: localhost:8443
+    volumes:
+      - ./nifi-cdc-postgresql-nar/target/nifi-cdc-postgresql-nar-2.12.0.nar:/opt/nifi/nifi-current/extensions/nifi-cdc-postgresql-nar-2.12.0.nar:ro
+    depends_on:
+      postgres14:
+        condition: service_healthy
